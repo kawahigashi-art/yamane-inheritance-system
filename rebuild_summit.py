@@ -1,24 +1,22 @@
 # =========================================================
-# ファイル名: rebuild_summit_v31_27_final.py
-# 開発責任: 擬似・オーナー監査官 (System-Core v31.27)
-# 統括監視: エラー対策専門チーム（デバッグ・ガーディアンズ） [cite: 12]
+# ファイル名: rebuild_summit_v31_28_final.py
+# 開発責任: 擬似・オーナー監査官 (System-Core v31.28)
+# 統括監視: エラー対策専門チーム（デバッグ・ガーディアンズ） 
 # 出力統括: ドキュメント・エンジニア ＆ アーティスティック・ディレクター [cite: 6, 9]
+# 聖典遵守: 既存コードの削除・省略を厳禁し、実行順序エラーを修正 [cite: 2]
 # =========================================================
 
 import streamlit as st
+
+# --- 0. システム最優先設定 (Streamlit制約により最上部に配置) ---
+# ※ init_system関数化せず、直に実行することで実行順序エラーを確実に回避 
+st.set_page_config(page_title="SUMMIT v31.28 PRO", layout="wide")
+
 import pandas as pd
 from decimal import Decimal, ROUND_HALF_UP
 import io
 
-# --- 0. システム最優先設定 (エラー回避のため冒頭に配置) ---
-def init_system():
-    if 'init' not in st.session_state:
-        st.set_page_config(page_title="SUMMIT v31.27 PRO", layout="wide")
-        st.session_state['init'] = True
-
-init_system()
-
-# --- 1. ライブラリ動的チェック (環境依存エラー防止)  ---
+# --- 1. ライブラリ動的チェック (環境依存エラー防止) ---
 try:
     from reportlab.pdfgen import canvas
     from reportlab.lib.pagesizes import A4
@@ -102,9 +100,9 @@ if check_password():
             v_ins = d(st.number_input("生命保険金", value=3651514))
             v_debt = d(st.number_input("債務・葬式費用", value=363580))
 
-    # --- 計算実行コア (エラー対策チームによる堅牢化)  ---
+    # --- 計算実行コア (エラー対策チームによる堅牢化) ---
     st_count = (1 if in_spouse else 0) + in_child
-    # ゼロ除算ガード
+    # ゼロ除算ガード 
     safe_area = max(d("0.1"), a_home)
     red_home = (v_home / safe_area) * min(a_home, d(330)) * d("0.8")
     ins_ded = min(v_ins, d(5000000) * d(st_count))
@@ -130,16 +128,17 @@ if check_password():
                 try:
                     buf = io.BytesIO()
                     canvas_obj = canvas.Canvas(buf, pagesize=A4)
+                    # デザイン担当指示によるフォントとレイアウト [cite: 10]
                     canvas_obj.setFont("Helvetica-Bold", 16)
                     canvas_obj.drawString(50, 800, "Yamane Accounting Inheritance Report")
                     canvas_obj.setFont("Helvetica", 12)
                     canvas_obj.drawString(50, 780, f"Net Assets: {int(pure_as):,} JPY")
                     canvas_obj.drawString(50, 760, f"Total Tax: {int(total_tax_1):,} JPY")
                     canvas_obj.save()
-                    st.download_button("PDFをダウンロード", buf.getvalue(), "Yamane_Summit_v31_27.pdf")
+                    st.download_button("PDFをダウンロード", buf.getvalue(), "Yamane_Summit_v31_28.pdf")
                 except Exception as e:
                     st.error(f"PDF生成中にエラーが発生しました: {e}")
         else:
             st.warning("PDF生成ライブラリ(ReportLab)が未検出のため、この機能は無効です。")
 
-st.sidebar.success("✅ System-Core v31.27 正常稼働（エラー対策済）")
+st.sidebar.success("✅ System-Core v31.28 正常稼働（エラー対策済）")
