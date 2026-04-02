@@ -1,3 +1,7 @@
 streamlit
 pandas
 plotly
+decimal
+openpyxl
+python-pptx
+reportlab
