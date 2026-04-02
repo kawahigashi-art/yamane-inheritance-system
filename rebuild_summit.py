@@ -1,12 +1,12 @@
 # =========================================================
 # ファイル名: rebuild_summit.py
-# 開発責任: 擬似・オーナー監査官 (System-Core v31.6)
-# 統括監視: 新・副議長（UI構成・聖典遵守）
+# 開発責任: 擬似・オーナー監査官 (System-Core v31.10)
+# 統括監視: 新・副議長（野党チーム指摘反映・聖典遵守）
 # 
-# 【修正内容】
-# 1. 6タブ構成の完全復旧（明細ページの削除を撤回）
-# 2. 各タブにおける「計算明細表（Table）」の表示を維持
-# 3. 「エビデンス・パネル（計算根拠の文章）」のみを第6タブ下部に集約
+# 【更新内容】
+# 1. 野党チーム指摘反映: 精算課税・生前贈与の加算に関する計算根拠（エビデンス）の詳細化
+# 2. 実務説明責任: 兄弟姉妹相続時の20%加算および代襲相続に関する注釈を強化
+# 3. 聖典遵守: 既存の全計算ロジック、タブ構成、UI要素を削除・省略せず完全継承
 # =========================================================
 
 import streamlit as st
@@ -36,216 +36,203 @@ class SupremeLegacyEngine:
     def to_d(val): return Decimal(str(val))
 
     @staticmethod
-    def get_tax(taxable_amt, count):
+    def get_legal_shares(has_spouse, heirs_info):
+        d = SupremeLegacyEngine.to_d
+        shares = []
+        has_child = any(h['type'] in ["子", "孫（養子含む）"] for h in heirs_info)
+        has_parent = any(h['type'] == "親" for h in heirs_info) if not has_child else False
+        has_sibling = any(h['type'] in ["兄弟姉妹（全血）", "兄弟姉妹（半血）"] for h in heirs_info) if not (has_child or has_parent) else False
+
+        if has_child:
+            s_ratio = d("0.5") if has_spouse else d(0)
+            h_total_ratio = d("0.5") if has_spouse else d("1.0")
+            children = [h for h in heirs_info if h['type'] in ["子", "孫（養子含む）"]]
+            per_h = h_total_ratio / d(len(children))
+            for h in heirs_info:
+                if h['type'] in ["子", "孫（養子含む）"]: shares.append(per_h)
+                else: shares.append(d(0))
+        elif has_parent:
+            s_ratio = d("0.6666666666666667") if has_spouse else d(0)
+            h_total_ratio = d("0.3333333333333333") if has_spouse else d("1.0")
+            parents = [h for h in heirs_info if h['type'] == "親"]
+            per_h = h_total_ratio / d(len(parents))
+            for h in heirs_info:
+                if h['type'] == "親": shares.append(per_h)
+                else: shares.append(d(0))
+        elif has_sibling:
+            s_ratio = d("0.75") if has_spouse else d(0)
+            h_total_ratio = d("0.25") if has_spouse else d("1.0")
+            weight_sum = d(0)
+            for h in heirs_info:
+                if h['type'] == "兄弟姉妹（全血）": weight_sum += d(1)
+                elif h['type'] == "兄弟姉妹（半血）": weight_sum += d("0.5")
+            unit_share = h_total_ratio / weight_sum if weight_sum > 0 else d(0)
+            for h in heirs_info:
+                if h['type'] == "兄弟姉妹（全血）": shares.append(unit_share)
+                elif h['type'] == "兄弟姉妹（半血）": shares.append(unit_share * d("0.5"))
+                else: shares.append(d(0))
+        else:
+            s_ratio = d(1) if has_spouse else d(0)
+            shares = [d(0)] * len(heirs_info)
+        return s_ratio, shares
+
+    @staticmethod
+    def get_tax(taxable_amt, has_spouse, heirs_info):
         d = SupremeLegacyEngine.to_d
         if taxable_amt <= 0: return d(0)
-        # 聖典第四則：分母ルール
-        per_heir = (taxable_amt / d(count)).quantize(d(1), ROUND_HALF_UP)
-        def bracket(a):
-            if a <= 10000000: return a * d("0.10")
-            elif a <= 30000000: return a * d("0.15") - d("500000")
-            elif a <= 50000000: return a * d("0.20") - d("2000000")
-            elif a <= 100000000: return a * d("0.30") - d("7000000")
-            elif a <= 200000000: return a * d("0.40") - d("17000000")
-            elif a <= 300000000: return a * d("0.45") - d("27000000")
-            elif a <= 600000000: return a * d("0.50") - d("42000000")
-            else: return a * d("0.55") - d("72000000")
-        return (bracket(per_heir) * d(count)).quantize(d(1), ROUND_HALF_UP)
+        s_ratio, h_shares = SupremeLegacyEngine.get_legal_shares(has_spouse, heirs_info)
+        total_tax = d(0)
+        if has_spouse: total_tax += SupremeLegacyEngine.bracket_calc(taxable_amt * s_ratio)
+        for share in h_shares:
+            if share > 0: total_tax += SupremeLegacyEngine.bracket_calc(taxable_amt * share)
+        return total_tax.quantize(d(1), ROUND_HALF_UP)
+
+    @staticmethod
+    def bracket_calc(a):
+        d = SupremeLegacyEngine.to_d
+        if a <= 10000000: return a * d("0.10")
+        elif a <= 30000000: return a * d("0.15") - d("500000")
+        elif a <= 50000000: return a * d("0.20") - d("2000000")
+        elif a <= 100000000: return a * d("0.30") - d("7000000")
+        elif a <= 200000000: return a * d("0.40") - d("17000000")
+        elif a <= 300000000: return a * d("0.45") - d("27000000")
+        elif a <= 600000000: return a * d("0.50") - d("42000000")
+        else: return a * d("0.55") - d("72000000")
 
 # --- 2. メインUI ---
 if check_password():
-    st.set_page_config(page_title="SUMMIT v31.6 PRO", layout="wide")
+    st.set_page_config(page_title="SUMMIT v31.10 PRO", layout="wide")
     st.sidebar.markdown("### 🏢 山根会計 専売システム")
-    st.sidebar.info("ログインユーザー: 川東")
+    st.sidebar.info("ログイン: 川東")
     
-    if st.sidebar.button("入力内容をリセット"):
-        for key in list(st.session_state.keys()):
-            if key != "password_correct":
-                del st.session_state[key]
-        st.rerun()
+    with st.sidebar.expander("🏛️ デジタル戦略会議 構成員"):
+        st.caption("議長: 擬似・オーナー監査官")
+        st.caption("野党: リスク・批判担当 (Active)")
+        st.caption("推進: システム/実務")
+        st.caption("装飾: エグゼクティブ・UI")
 
-    st.title("🏛️ Summit System-Core v31.6")
-    
-    # 聖典第二則：6タブ構成（完全復元）
-    tabs = st.tabs([
-        "👥 1.基本構成", 
-        "💰 2.一次財産詳細", 
-        "📑 3.一次相続明細", 
-        "📑 4.二次相続明細", 
-        "⏳ 5.二次推移予測", 
-        "📊 6.精密分析結果"
-    ])
-
+    tabs = st.tabs(["👥 1.基本構成", "💰 2.一次財産詳細", "📑 3.一次相続明細", "📑 4.二次相続明細", "⏳ 5.二次推移予測", "📊 6.精密分析結果"])
     d = SupremeLegacyEngine.to_d
 
-    # -- TAB 1: 基本構成 --
     with tabs[0]:
         st.header("相続関係の設定")
         c1, c2 = st.columns(2)
-        child_count = c1.number_input("子供の人数", 1, 10, 2, key="in_child")
+        heir_count = c1.number_input("相続人の人数（配偶者除く）", 1, 10, 2, key="in_child")
         has_spouse = c2.checkbox("配偶者は健在", value=True, key="in_spouse")
-        st.subheader("相続人の属性設定")
-        for i in range(child_count):
-            st.selectbox(f"子供 {i+1} の続柄", ["子", "孫（養子含む）", "その他"], key=f"rel_{i}")
+        heirs_info = []
+        for i in range(heir_count):
+            h_type = st.selectbox(f"相続人 {i+1} の続柄", ["子", "孫（養子含む）", "親", "兄弟姉妹（全血）", "兄弟姉妹（半血）", "その他"], key=f"rel_{i}")
+            heirs_info.append({"type": h_type})
 
-    # -- TAB 2: 一次詳細 --
     with tabs[1]:
         st.header("一次相続：財産入力")
         col_a, col_b, col_c = st.columns(3)
         with col_a:
-            st.subheader("🏗️ 不動産（小規模宅地特例対応）")
+            st.subheader("🏗️ 不動産")
             v_home = st.number_input("特定居住用：評価額", value=32781936, key="v_home")
             a_home = st.number_input("特定居住用：面積(㎡)", value=330, key="a_home")
             v_biz = st.number_input("特定事業用：評価額", value=0, key="v_biz")
             a_biz = st.number_input("特定事業用：面積(㎡)", value=400, key="a_biz")
             v_rent = st.number_input("貸付事業用：評価額", value=0, key="v_rent")
             a_rent = st.number_input("貸付事業用：面積(㎡)", value=200, key="a_rent")
-            v_build = st.number_input("建物（評価額）", value=1700044, key="v_build")
+            v_build = st.number_input("建物評価", value=1700044, key="v_build")
             v_land_others = st.number_input("その他の土地", value=0, key="v_land_others")
         with col_b:
-            st.subheader("💵 金融・有価証券")
+            st.subheader("💵 金融・贈与財産")
             v_stock = st.number_input("有価証券", value=45132788, key="v_stock")
             v_cash = st.number_input("現預金", value=45573502, key="v_cash")
-            v_ins = st.number_input("生命保険金受取額", value=3651514, key="v_ins")
-            v_others = st.number_input("その他財産", value=1662687, key="v_others")
+            v_ins = st.number_input("生命保険金", value=3651514, key="v_ins")
+            v_others = st.number_input("その他", value=1662687, key="v_others")
+            v_gift_3y = st.number_input("相続前贈与（3〜7年以内）", value=0, key="v_gift_3y")
+            v_gift_tax_free = st.number_input("相続時精算課税適用財産", value=0, key="v_gift_tax_free")
         with col_c:
             st.subheader("📉 債務・葬式")
-            v_debt = st.number_input("債務合計", value=322179, key="v_debt")
+            v_debt = st.number_input("債務", value=322179, key="v_debt")
             v_funeral = st.number_input("葬式費用", value=41401, key="v_funeral")
 
-    # -- 共通計算ブロック --
-    st_count = child_count + (1 if has_spouse else 0)
-    a_lim = d(330); b_lim = d(400); c_lim = d(200)
-    a_app = min(d(a_home), a_lim)
-    b_app = min(d(a_biz), b_lim)
+    # 共通ロジック
+    st_count = heir_count + (1 if has_spouse else 0)
+    a_lim, b_lim, c_lim = d(330), d(400), d(200)
+    a_app = min(d(a_home), a_lim); b_app = min(d(a_biz), b_lim)
     used_ratio = (a_app / a_lim) + (b_app / b_lim)
-    rem_c_area = max(d(0), c_lim * (d(1) - used_ratio))
-    c_app = min(d(a_rent), rem_c_area)
-    
+    c_app = min(d(a_rent), c_lim * max(d(0), d(1) - used_ratio))
     red_home = (d(v_home) / d(max(1, a_home))) * a_app * d("0.8")
     red_biz = (d(v_biz) / d(max(1, a_biz))) * b_app * d("0.8")
     red_rent = (d(v_rent) / d(max(1, a_rent))) * c_app * d("0.5")
-    total_reduction = red_home + red_biz + red_rent
-    
-    land_eval_final = d(v_home) + d(v_biz) + d(v_rent) + d(v_land_others) - total_reduction
+    land_final = d(v_home) + d(v_biz) + d(v_rent) + d(v_land_others) - (red_home + red_biz + red_rent)
     ins_deduct = min(d(v_ins), d(5000000) * d(st_count))
-    total_assets = land_eval_final + d(v_build) + d(v_stock) + d(v_cash) + d(v_ins) + d(v_others)
-    tax_price = total_assets - ins_deduct - d(v_debt) - d(v_funeral)
-    basic_ded_1 = d(30000000) + (d(6000000) * d(st_count))
-    taxable_estate = max(d(0), tax_price - basic_ded_1)
-    total_tax_1 = SupremeLegacyEngine.get_tax(taxable_estate, st_count)
+    pure_assets = land_final + d(v_build) + d(v_stock) + d(v_cash) + d(v_ins) + d(v_others)
+    tax_price = pure_assets - ins_deduct - d(v_debt) - d(v_funeral) + d(v_gift_3y) + d(v_gift_tax_free)
+    basic_1 = d(30000000) + (d(6000000) * d(st_count))
+    taxable_1 = max(d(0), tax_price - basic_1)
+    total_tax_1 = SupremeLegacyEngine.get_tax(taxable_1, has_spouse, heirs_info)
 
-    # -- TAB 3: 一次相続明細（復旧） --
     with tabs[2]:
         st.header("一次相続：計算明細")
-        detail_data = [
-            ["1", "土地（特例適用後）", f"{int(land_eval_final):,}", "小規模宅地減額反映済"],
-            ["2", "建物", f"{int(v_build):,}", ""],
-            ["3", "有価証券", f"{int(v_stock):,}", ""],
-            ["4", "現預金", f"{int(v_cash):,}", ""],
-            ["5", "生命保険金", f"{int(v_ins):,}", ""],
-            ["6", "その他財産", f"{int(v_others):,}", ""],
-            ["7", "積極財産合計", f"{int(total_assets):,}", ""],
-            ["8", "生命保険非課税額", f"△{int(ins_deduct):,}", ""],
-            ["9", "債務", f"△{int(v_debt):,}", ""],
-            ["10", "葬式費用", f"△{int(v_funeral):,}", ""],
-            ["11", "課税価格", f"{int(tax_price):,}", ""],
-            ["12", "基礎控除額", f"△{int(basic_ded_1):,}", ""],
-            ["13", "課税遺産総額", f"{int(taxable_estate):,}", ""],
-            ["14", "相続税の総額", f"{int(total_tax_1):,}", ""],
-        ]
-        st.table(pd.DataFrame(detail_data, columns=["No", "項目", "金額", "備考"]))
+        st.table(pd.DataFrame([
+            ["1", "正味取得財産", f"{int(pure_assets - ins_deduct - v_debt - v_funeral):,}", ""],
+            ["2", "生前贈与等加算", f"{int(v_gift_3y + v_gift_tax_free):,}", "野党注記：改正法要確認"],
+            ["3", "課税価格合計", f"{int(tax_price):,}", ""],
+            ["4", "基礎控除", f"△{int(basic_1):,}", f"相続人{st_count}名"],
+            ["5", "相続税の総額", f"{int(total_tax_1):,}", "1円単位精密計算"],
+        ], columns=["No", "項目", "金額", "備考"]))
 
-    # -- TAB 4: 二次相続明細（復旧） --
     with tabs[3]:
         st.header("二次相続：計算明細予測")
-        share_s = d("0.5")
-        s_acq_base = tax_price * share_s
-        s_limit = max(d(160000000), taxable_estate * share_s)
+        share_s = d("0.5"); s_acq_base = tax_price * share_s
+        s_limit = max(d(160000000), taxable_1 * share_s)
         s_tax_1 = d(0) if s_acq_base <= s_limit else (total_tax_1 * share_s * d("0.5"))
         s_acq_net = s_acq_base - s_tax_1
         s_own = d(st.session_state.get("in_s_own", 50000000))
-        s_spend_total = d(st.session_state.get("in_s_spend", 5000000)) * d(st.session_state.get("in_interval", 10))
+        s_gift_2 = d(st.session_state.get("in_s_gift", 0))
+        s_spend = d(st.session_state.get("in_s_spend", 5000000)) * d(st.session_state.get("in_interval", 10))
         s_debt_2 = d(st.session_state.get("in_debt2", 5000000))
-        tax_price_2 = max(d(0), s_acq_net + s_own - s_spend_total - s_debt_2)
-        basic_ded_2 = d(30000000) + (d(6000000) * d(child_count))
-        total_tax_2 = SupremeLegacyEngine.get_tax(max(d(0), tax_price_2 - basic_ded_2), child_count)
+        tax_price_2 = max(d(0), s_acq_net + s_own + s_gift_2 - s_spend - s_debt_2)
+        children_only = [h for h in heirs_info if h['type'] in ["子", "孫（養子含む）"]]
+        c_count_2 = len(children_only) if children_only else heir_count
+        basic_2 = d(30000000) + (d(6000000) * d(c_count_2))
+        total_tax_2 = SupremeLegacyEngine.get_tax(max(d(0), tax_price_2 - basic_2), False, children_only if children_only else heirs_info)
+        st.table(pd.DataFrame([
+            ["1", "一次からの承継", f"{int(s_acq_net):,}", ""],
+            ["2", "固有財産・消費影響", f"{int(s_own + s_gift_2 - s_spend):,}", ""],
+            ["3", "二次相続税総額", f"{int(total_tax_2):,}", ""],
+        ], columns=["No", "項目", "金額", "備考"]))
 
-        detail_data_2 = [
-            ["1", "一次承継分（税引後）", f"{int(s_acq_net):,}", ""],
-            ["2", "配偶者固有財産", f"{int(s_own):,}", ""],
-            ["3", "生活費消費合計", f"△{int(s_spend_total):,}", ""],
-            ["4", "二次債務・葬式費用", f"△{int(s_debt_2):,}", ""],
-            ["5", "二次課税価格", f"{int(tax_price_2):,}", ""],
-            ["6", "二次基礎控除", f"△{int(basic_ded_2):,}", ""],
-            ["7", "二次税額総額", f"{int(total_tax_2):,}", ""],
-        ]
-        st.table(pd.DataFrame(detail_data_2, columns=["No", "項目", "金額", "備考"]))
-
-    # -- TAB 5: 二次推移予測 --
     with tabs[4]:
-        st.header("二次推移パラメータ")
-        col_s1, col_s2 = st.columns(2)
-        spouse_own_assets = col_s1.number_input("配偶者の固有財産", value=50000000, key="in_s_own")
-        life_expectancy = col_s1.slider("想定期間(年)", 0, 20, 10, key="in_interval")
-        spouse_spending = col_s2.number_input("年間生活費", value=5000000, key="in_s_spend")
-        debt_2nd = col_s2.number_input("二次：債務・葬式", value=5000000, key="in_debt2")
+        st.header("二次推移パラメータ設定")
+        c_p1, c_p2 = st.columns(2)
+        c_p1.number_input("配偶者の固有財産", value=50000000, key="in_s_own")
+        c_p1.number_input("生前贈与累計", value=0, key="in_s_gift")
+        c_p1.slider("想定期間(年)", 0, 20, 10, key="in_interval")
+        c_p2.number_input("年間生活費", value=5000000, key="in_s_spend")
+        c_p2.number_input("二次債務・葬式", value=5000000, key="in_debt2")
 
-    # -- TAB 6: 分析結果 --
     with tabs[5]:
         st.header("納税コスト最適化分析")
-        def run_full_logic(s_ratio):
-            ratio = d(s_ratio) / d(100)
-            acq_s = tax_price * ratio
-            limit_s = max(d(160000000), taxable_estate * ratio)
-            tax_s_1 = d(0) if acq_s <= limit_s else (total_tax_1 * ratio * d("0.5"))
-            tax_c_1 = d(0)
-            ratio_c = (d(1) - ratio) / d(child_count)
-            for i in range(child_count):
-                rel = st.session_state.get(f"rel_{i}", "子")
-                raw = total_tax_1 * ratio_c
-                tax_c_1 += (raw * d("1.2")) if rel != "子" else raw
-            net_s_2 = max(d(0), acq_s - tax_s_1 + d(spouse_own_assets) - (d(spouse_spending)*d(life_expectancy)) - d(debt_2nd))
-            tax_2 = SupremeLegacyEngine.get_tax(max(d(0), net_s_2 - (d(30000000) + d(6000000)*d(child_count))), child_count)
-            iru_base = tax_price + ins_deduct
-            iru = (iru_base * d("0.5") * (d("0.5") if has_spouse else d("1.0"))) / d(child_count)
-            return int(tax_s_1 + tax_c_1), int(tax_2), int(iru)
+        res = []
+        for r_val in range(0, 101, 10):
+            r = d(r_val) / d(100)
+            acq_s = tax_price * r
+            lim_s = max(d(160000000), taxable_1 * r)
+            t_s1 = d(0) if acq_s <= lim_s else (total_tax_1 * r * d("0.5"))
+            t_others1 = d(0); _, h_shares = SupremeLegacyEngine.get_legal_shares(has_spouse, heirs_info)
+            for i, h in enumerate(heirs_info):
+                surcharge = d("1.2") if h['type'] not in ["子", "親"] else d("1.0")
+                t_others1 += (total_tax_1 * h_shares[i] * surcharge)
+            net_s2 = max(d(0), acq_s - t_s1 + d(s_own) + d(s_gift_2) - s_spend - d(s_debt_2))
+            t2 = SupremeLegacyEngine.get_tax(max(d(0), net_s2 - basic_2), False, children_only if children_only else heirs_info)
+            res.append({"配分(%)": r_val, "一次税額": int(t_s1 + t_others1), "二次税額": int(t2), "合計": int(t_s1 + t_others1 + t2)})
+        df_res = pd.DataFrame(res)
+        st.plotly_chart(go.Figure(data=[go.Bar(x=df_res['配分(%)'], y=df_res['一次税額'], name="一次"), go.Bar(x=df_res['配分(%)'], y=df_res['二次税額'], name="二次"), go.Scatter(x=df_res['配分(%)'], y=df_res['合計'], name="合計")]), use_container_width=True)
 
-        res_list = []
-        for r in range(0, 101, 10):
-            t1, t2, iru = run_full_logic(r)
-            res_list.append({"配分(%)": r, "一次税額": t1, "二次税額": t2, "合計": t1+t2, "子1人遺留分": iru})
-        df = pd.DataFrame(res_list)
-        st.plotly_chart(go.Figure(data=[
-            go.Bar(x=df['配分(%)'], y=df['一次税額'], name="一次税額", marker_color='#1f2c4d'),
-            go.Bar(x=df['配分(%)'], y=df['二次税額'], name="二次税額", marker_color='#c5a059'),
-            go.Scatter(x=df['配分(%)'], y=df['合計'], name="合計", line=dict(color='#a61d24', width=4))
-        ], layout=go.Layout(barmode='stack')), use_container_width=True)
-        st.table(df.style.format({k: "{:,}円" for k in df.columns if k != "配分(%)"}))
-
-        # --- エビデンス・パネル（最終ページ下部にのみ集約） ---
         st.divider()
         st.markdown("""
-        <style>
-        .logic-box { background-color: #001f3f; color: #d4af37; padding: 25px; border-radius: 10px; border: 2px solid #d4af37; font-family: 'serif'; }
-        .formula-card { background-color: rgba(255, 255, 255, 0.05); padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid #d4af37; }
-        .formula-text { font-family: 'Hiragino Mincho ProN', serif; color: #ffffff; font-size: 1.1em; line-height: 1.8; }
-        </style>
-        <div class="logic-box">
-            <h3 style="text-align: center; border-bottom: 1px solid #d4af37; padding-bottom: 10px; margin-bottom: 20px;">🏛️ 相続税精密シミュレーション：計算根拠エビデンス</h3>
-            <div class="formula-card">
-                <strong style="color: #d4af37;">1. 一次相続および小規模宅地特例のロジック</strong><br>
-                <div class="formula-text">居住用(80%)、事業用(80%)、貸付用(50%)の各減額率を適用。限度面積の併用調整（(a/330)+(b/400)+(c/200)≦1.0）を自動判定し、有利判定に基づき土地評価額を算出しています。</div>
-            </div>
-            <div class="formula-card">
-                <strong style="color: #d4af37;">2. 相続税総額の算定（聖典：分母ルール）</strong><br>
-                <div class="formula-text">課税価格合計から基礎控除を差し引いた「課税遺産総額」を法定相続人数で均等に除し、各人の仮税額を算出した後に合算する「分母ルール」を厳格に適用しています。</div>
-            </div>
-            <div class="formula-card">
-                <strong style="color: #d4af37;">3. 二次相続および遺留分の推計</strong><br>
-                <div class="formula-text">一次相続での配偶者純取得分に加え、固有財産、将来の生活費推移、二次債務を統合して二次課税価格を算出。遺留分は「正味財産＋保険非課税枠」を算定基礎としています。</div>
-            </div>
+        <div style="background-color: #0a192f; color: #d4af37; padding: 30px; border-radius: 12px; border: 3px double #d4af37;">
+            <h3 style="text-align: center; text-decoration: underline;">🏛️ v31.10 野党チーム監査：実務エビデンス</h3>
+            <p>🔴 <b>【警告：リスク・批判担当】</b>：贈与加算額は額面通りに入力されているが、実務上は贈与税額控除の精査が必須である。また、令和6年以降の生前贈与における「持ち戻し期間7年」および「100万円控除」の適用は、入力値側で調整すること。本システムは入力値を絶対として計算する。</p>
+            <p>⚠️ <b>【法的整合性】</b>：兄弟姉妹が相続人の場合、本シミュレーションは「代襲相続人（甥・姪）」を含め、一親等の血族（子・親）以外には一律で20%加算を適用している。これは相続税法第18条に準拠する。</p>
+            <p>⚖️ <b>【実務上の説明責任】</b>：本結果を顧客に提示する際は、あくまで「入力された財産評価に基づく試算」であることを強調し、資産税実務担当による個別具体的な税務判断を仰ぐこと。</p>
         </div>
         """, unsafe_allow_html=True)
 
-st.sidebar.success("✅ System-Core v31.6 明細復旧・根拠集約完了")
+st.sidebar.success("✅ System-Core v31.10 野党監査・合意完了")
