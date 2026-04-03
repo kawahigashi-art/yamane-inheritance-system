@@ -26,68 +26,75 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 # =========================================================
 # ★ Excel生成関数（税理士提出レベル）
 # =========================================================
-def create_excel_file(df1, df2, df_sim):
+def create_excel_file(df1, df2, df_sim, tax_p, total_tax_1, total_tax_2):
 
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    wb = Workbook()
+
+    # サマリー
+    ws = wb.active
+    ws.title = "サマリー"
+
+    ws["A1"] = "相続税シミュレーション結果"
+    ws["A1"].font = Font(size=16, bold=True)
+
+    ws["A3"] = "総資産"
+    ws["B3"] = int(tax_p)
+
+    ws["A4"] = "一次相続税"
+    ws["B4"] = int(total_tax_1)
+
+    ws["A5"] = "二次相続税"
+    ws["B5"] = int(total_tax_2)
+
+    ws["A6"] = "合計税額"
+    ws["B6"] = int(total_tax_1 + total_tax_2)
+
+    # 一次相続
+    ws2 = wb.create_sheet("一次相続")
+    ws2.append(["No", "項目", "金額", "備考"])
+    for r in df1.values.tolist():
+        ws2.append(r)
+
+    # 二次相続
+    ws3 = wb.create_sheet("二次相続")
+    ws3.append(["No", "項目", "金額", "備考"])
+    for r in df2.values.tolist():
+        ws3.append(r)
+
+    # シミュレーション
+    ws4 = wb.create_sheet("シミュレーション")
+    ws4.append(list(df_sim.columns))
+    for r in df_sim.values.tolist():
+        ws4.append(r)
+
+    # 最適値
+    min_row = min(df_sim.values.tolist(), key=lambda x: x[3])
+
+    # 提案書
+    ws5 = wb.create_sheet("提案書")
+    ws5["A1"] = "提案書（自動生成）"
+    ws5["A1"].font = Font(size=16, bold=True)
+
+    ws5["A3"] = "■ 結論"
+    ws5["A4"] = f"最適配分：{min_row[0]}"
+
+    ws5["A6"] = "■ 理由"
+    ws5["A7"] = "・合計税額が最小"
+    ws5["A8"] = "・二次相続とのバランスが最適"
+
+    ws5["A10"] = "■ 推奨アクション"
+    ws5["A11"] = "・遺言書の作成"
+    ws5["A12"] = "・生前贈与の検討"
+    ws5["A13"] = "・不動産の整理"
+
+    from io import BytesIO
     output = BytesIO()
+    wb.save(output)
 
-    # --- pandas出力 ---
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df1.to_excel(writer, sheet_name="一次相続", index=False)
-        df2.to_excel(writer, sheet_name="二次相続", index=False)
-        df_sim.to_excel(writer, sheet_name="シミュレーション", index=False)
-
-    output.seek(0)
-
-    wb = load_workbook(output)
-
-    # --- スタイル ---
-    header_fill = PatternFill(start_color="1f2c4d", end_color="1f2c4d", fill_type="solid")
-    header_font = Font(color="FFFFFF", bold=True)
-    title_font = Font(size=14, bold=True)
-    center_align = Alignment(horizontal="center", vertical="center")
-
-    thin_border = Border(
-        left=Side(style="thin"),
-        right=Side(style="thin"),
-        top=Side(style="thin"),
-        bottom=Side(style="thin")
-    )
-
-    for sheet_name in wb.sheetnames:
-        ws = wb[sheet_name]
-
-        # タイトル行
-        ws.insert_rows(1)
-        ws["A1"] = "山根会計 相続税シミュレーション資料"
-        ws["A1"].font = title_font
-
-        # ヘッダー装飾
-        for cell in ws[2]:
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.alignment = center_align
-
-        # 罫線＋数値フォーマット
-        for row in ws.iter_rows(min_row=2):
-            for cell in row:
-                cell.border = thin_border
-                if isinstance(cell.value, int):
-                    cell.number_format = "#,##0"
-
-        # 列幅調整
-        for col in ws.columns:
-            max_length = 0
-            col_letter = col[0].column_letter
-            for cell in col:
-                if cell.value:
-                    max_length = max(max_length, len(str(cell.value)))
-            ws.column_dimensions[col_letter].width = max_length + 2
-
-    final_output = BytesIO()
-    wb.save(final_output)
-
-    return final_output.getvalue()
-
+    return output.getvalue()
 
 # --- 0. セキュリティ・ページ設定 ---
 def check_password():
@@ -388,7 +395,14 @@ if check_password():
         st.subheader("📥 Excel出力")
 
         try:
-            excel_data = create_excel_file(df1, df2, df_sim)
+            excel_data = create_excel_file(
+    df1,
+    df2,
+    df_sim,
+    tax_p,
+    total_tax_1,
+    total_tax_2
+)
             st.download_button(
                 label="📊 Excelファイルをダウンロード",
                 data=excel_data,
