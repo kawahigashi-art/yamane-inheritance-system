@@ -29,73 +29,138 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 def create_excel_file(df1, df2, df_sim, tax_p, total_tax_1, total_tax_2):
 
     from openpyxl import Workbook
-    from openpyxl.styles import Font
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.chart import BarChart, Reference, LineChart
+    from io import BytesIO
+    from datetime import datetime
 
     wb = Workbook()
 
-    # サマリー
+    # 色定義
+    NAVY = "1f2c4d"
+    GOLD = "c5a059"
+
+    # =====================================================
+    # ■ ① 表紙
+    # =====================================================
     ws = wb.active
-    ws.title = "サマリー"
+    ws.title = "表紙"
 
-    ws["A1"] = "相続税シミュレーション結果"
-    ws["A1"].font = Font(size=16, bold=True)
+    ws.merge_cells("A1:D2")
+    ws["A1"] = "相続税シミュレーション報告書"
+    ws["A1"].font = Font(size=20, bold=True)
+    ws["A1"].alignment = Alignment(horizontal="center")
 
-    ws["A3"] = "総資産"
-    ws["B3"] = int(tax_p)
+    ws["A4"] = "顧客名"
+    ws["B4"] = "＿＿＿＿様"
 
-    ws["A4"] = "一次相続税"
-    ws["B4"] = int(total_tax_1)
+    ws["A5"] = "作成日"
+    ws["B5"] = datetime.now().strftime("%Y/%m/%d")
 
-    ws["A5"] = "二次相続税"
-    ws["B5"] = int(total_tax_2)
+    ws["A6"] = "担当者"
+    ws["B6"] = "山根会計"
 
-    ws["A6"] = "合計税額"
-    ws["B6"] = int(total_tax_1 + total_tax_2)
+    ws["A8"] = "【結論】"
+    ws["A9"] = "最適な配分戦略を次ページ以降に提示"
 
-    # 一次相続
-    ws2 = wb.create_sheet("一次相続")
-    ws2.append(["No", "項目", "金額", "備考"])
-    for r in df1.values.tolist():
-        ws2.append(r)
+    # =====================================================
+    # ■ ② サマリー
+    # =====================================================
+    ws2 = wb.create_sheet("サマリー")
 
-    # 二次相続
-    ws3 = wb.create_sheet("二次相続")
-    ws3.append(["No", "項目", "金額", "備考"])
-    for r in df2.values.tolist():
+    ws2["A1"] = "重要指標"
+    ws2["A1"].font = Font(size=16, bold=True)
+
+    ws2["A3"] = "総資産"
+    ws2["B3"] = int(tax_p)
+
+    ws2["A4"] = "一次相続税"
+    ws2["B4"] = int(total_tax_1)
+
+    ws2["A5"] = "二次相続税"
+    ws2["B5"] = int(total_tax_2)
+
+    ws2["A6"] = "合計税額"
+    ws2["B6"] = int(total_tax_1 + total_tax_2)
+    ws2["B6"].font = Font(bold=True, color=GOLD)
+
+    # 数値フォーマット
+    for row in ws2.iter_rows(min_row=3, max_row=6, min_col=2, max_col=2):
+        for cell in row:
+            cell.number_format = "#,##0"
+
+    # =====================================================
+    # ■ ③ シミュレーショングラフ
+    # =====================================================
+    ws3 = wb.create_sheet("グラフ")
+
+    ws3.append(list(df_sim.columns))
+    for r in df_sim.values.tolist():
         ws3.append(r)
 
-    # シミュレーション
-    ws4 = wb.create_sheet("シミュレーション")
-    ws4.append(list(df_sim.columns))
-    for r in df_sim.values.tolist():
+    # 数値変換
+    for row in ws3.iter_rows(min_row=2):
+        row[1].value = int(row[1])
+        row[2].value = int(row[2])
+        row[3].value = int(row[3])
+
+    data = Reference(ws3, min_col=2, max_col=4, min_row=1, max_row=ws3.max_row)
+    cats = Reference(ws3, min_col=1, min_row=2, max_row=ws3.max_row)
+
+    bar = BarChart()
+    bar.add_data(data, titles_from_data=True)
+    bar.set_categories(cats)
+    bar.title = "相続税シミュレーション"
+
+    ws3.add_chart(bar, "F2")
+
+    # =====================================================
+    # ■ ④ 一次相続
+    # =====================================================
+    ws4 = wb.create_sheet("一次相続")
+    ws4.append(["No", "項目", "金額", "備考"])
+
+    for r in df1.values.tolist():
         ws4.append(r)
 
-    # 最適値
+    # =====================================================
+    # ■ ⑤ 二次相続
+    # =====================================================
+    ws5 = wb.create_sheet("二次相続")
+    ws5.append(["No", "項目", "金額", "備考"])
+
+    for r in df2.values.tolist():
+        ws5.append(r)
+
+    # =====================================================
+    # ■ ⑥ 提案書
+    # =====================================================
+    ws6 = wb.create_sheet("提案書")
+
     min_row = min(df_sim.values.tolist(), key=lambda x: x[3])
 
-    # 提案書
-    ws5 = wb.create_sheet("提案書")
-    ws5["A1"] = "提案書（自動生成）"
-    ws5["A1"].font = Font(size=16, bold=True)
+    ws6["A1"] = "提案書"
+    ws6["A1"].font = Font(size=16, bold=True)
 
-    ws5["A3"] = "■ 結論"
-    ws5["A4"] = f"最適配分：{min_row[0]}"
+    ws6["A3"] = "■ 結論"
+    ws6["A4"] = f"最適配分：{min_row[0]}"
 
-    ws5["A6"] = "■ 理由"
-    ws5["A7"] = "・合計税額が最小"
-    ws5["A8"] = "・二次相続とのバランスが最適"
+    ws6["A6"] = "■ 理由"
+    ws6["A7"] = "・合計税額が最小となるため"
+    ws6["A8"] = "・二次相続を含めた最適設計"
 
-    ws5["A10"] = "■ 推奨アクション"
-    ws5["A11"] = "・遺言書の作成"
-    ws5["A12"] = "・生前贈与の検討"
-    ws5["A13"] = "・不動産の整理"
+    ws6["A10"] = "■ 推奨アクション"
+    ws6["A11"] = "・遺言書の作成"
+    ws6["A12"] = "・生前贈与の活用"
+    ws6["A13"] = "・不動産の整理"
 
-    from io import BytesIO
+    # =====================================================
+    # ■ 保存
+    # =====================================================
     output = BytesIO()
     wb.save(output)
 
     return output.getvalue()
-
 # --- 0. セキュリティ・ページ設定 ---
 def check_password():
     if "password_correct" not in st.session_state:
@@ -395,7 +460,7 @@ if check_password():
         st.subheader("📥 Excel出力")
 
         try:
-            excel_data = create_excel_file(
+           excel_data = create_excel_file(
     df1,
     df2,
     df_sim,
