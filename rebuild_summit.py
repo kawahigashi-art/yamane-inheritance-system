@@ -286,6 +286,9 @@ if check_password():
 
     tabs = st.tabs([" 👥  1.基本構成", " 💰  2.一次財産詳細", " 📑  3.一次相続明細", " 📑  4.二次相続明細", " ⏳  5.二次推移予測", " 📊  6.精密分析結果"])
     d = SupremeLegacyEngine.to_d
+    df1 = None
+　　df2 = None
+　　df_sim = None
     
     # -- TAB 1: 基本構成 --
     with tabs[0]:
@@ -367,6 +370,7 @@ if check_password():
             ["10", "【相続税の総額】", f"{int(total_tax_1):,}", ""],
         ], columns=["No", "項目", "金額", "備考"])
         st.table(df1)
+　　　　 df1 = pd.DataFrame([...])
 
     # -- TAB 4: 二次相続明細 --
     with tabs[3]:
@@ -387,6 +391,7 @@ if check_password():
         basic_2 = d(30000000) + (d(6000000) * d(c_count_2))
         taxable_2 = max(d(0), tax_p_2 - basic_2)
         total_tax_2 = SupremeLegacyEngine.get_tax(taxable_2, False, child_only if child_only else heirs_info)
+        df2 = pd.DataFrame([...])
         
         df2 = pd.DataFrame([
             ["1", "一次からの純承継分", f"{int(net_acq_s):,}", f"配偶者取得{int(ratio_s*100)}%時"],
@@ -422,6 +427,7 @@ if check_password():
             tp2 = max(d(0), net_s + s_own - s_spend_total)
             t2 = SupremeLegacyEngine.get_tax(max(0, tp2 - basic_2), False, child_only if child_only else heirs_info)
             sim_results.append({"配分(%)": f"{i}%", "一次相続税額": int(t1), "二次相続税額": int(t2), "合計納税額": int(t1 + t2)})
+            df_sim = pd.DataFrame(sim_results)
         
         df_sim = pd.DataFrame(sim_results)
         fig = go.Figure()
