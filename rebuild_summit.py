@@ -287,8 +287,8 @@ if check_password():
     tabs = st.tabs([" 👥  1.基本構成", " 💰  2.一次財産詳細", " 📑  3.一次相続明細", " 📑  4.二次相続明細", " ⏳  5.二次推移予測", " 📊  6.精密分析結果"])
     d = SupremeLegacyEngine.to_d
     df1 = None
-　　df2 = None
-　　df_sim = None
+df2 = None
+df_sim = None
     
     # -- TAB 1: 基本構成 --
     with tabs[0]:
