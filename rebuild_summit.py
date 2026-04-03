@@ -15,6 +15,21 @@ import plotly.graph_objects as go
 from decimal import Decimal, ROUND_HALF_UP
 import streamlit.components.v1 as components
 
+from io import BytesIO
+
+# --- Excel生成関数 ---
+def create_excel_file(df1, df2, df_sim):
+
+    output = BytesIO()
+
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+
+        df1.to_excel(writer, sheet_name="一次相続", index=False)
+        df2.to_excel(writer, sheet_name="二次相続", index=False)
+        df_sim.to_excel(writer, sheet_name="シミュレーション", index=False)
+
+    return output.getvalue()
+
 # --- 0. セキュリティ・ページ設定 ---
 def check_password():
     if "password_correct" not in st.session_state:
