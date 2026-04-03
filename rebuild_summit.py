@@ -456,23 +456,29 @@ if check_password():
         """, unsafe_allow_html=True)
         
         # --- Excel出力（★追加） ---
-        st.divider()
-        st.subheader("📥 Excel出力")
+        # --- Excel出力 ---
+# =========================
+# Excel出力（ここに固定）
+# =========================
+st.divider()
+st.subheader("📥 Excel出力")
 
-        try:
-           excel_data = create_excel_file(
-    df1,
-    df2,
-    df_sim,
-    tax_p,
-    total_tax_1,
-    total_tax_2
-)
-            st.download_button(
-                label="📊 Excelファイルをダウンロード",
-                data=excel_data,
-                file_name="相続シミュレーション.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        except Exception as e:
-            st.error(f"Excel出力エラー: {e}")
+try:
+    excel_data = create_excel_file(
+        df1,
+        df2,
+        df_sim,
+        tax_p,
+        total_tax_1,
+        total_tax_2
+    )
+
+    st.download_button(
+        label="📊 Excelファイルをダウンロード",
+        data=excel_data,
+        file_name="相続シミュレーション.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+except Exception as e:
+    st.error(f"Excel出力エラー: {e}")
