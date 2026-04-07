@@ -4,3 +4,4 @@ pymupdf
 pdfplumber
 pillow
 pytesseract
+plotly
