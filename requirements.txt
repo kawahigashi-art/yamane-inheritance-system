@@ -7,3 +7,4 @@ pytesseract
 plotly
 openpyxl
 reportlab
+python-pptx
