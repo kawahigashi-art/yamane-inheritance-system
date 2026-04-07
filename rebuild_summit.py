@@ -3,12 +3,30 @@ from __future__ import annotations
 # =========================================================
 # 0. Imports / Page Config
 # =========================================================
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from io import BytesIO
 from numbers import Number
-from typing import Any
+import os
+from typing import Any, Optional
+@dataclass
+class CalculationContext:
+    """
+    計算プロセス全体で共有されるコンテキスト情報を保持するデータクラス。
+    一次相続・二次相続の入力データおよび計算結果を統合管理します。
+    """
+    primary_inputs: dict = field(default_factory=dict)
+    secondary_inputs: Optional[dict] = field(default_factory=dict)
+    primary_result: Optional[dict] = field(default_factory=dict)
+    common_config: dict = field(default_factory=dict)
+    
+    # 拡張性を考慮し、動的な属性追加を許可
+    def __post_init__(self):
+        if self.primary_inputs is None:
+            self.primary_inputs = {}
+        if self.secondary_inputs is None:
+            self.secondary_inputs = {}
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -16,6 +34,15 @@ import streamlit as st
 import streamlit.components.v1 as components
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+from reportlab.pdfbase.pdfmetrics import registerFont
+from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from pptx import Presentation
+from pptx.util import Inches, Pt
 
 st.set_page_config(page_title="SUMMIT v31.16 PRO", layout="wide")
 
@@ -24,9 +51,16 @@ st.set_page_config(page_title="SUMMIT v31.16 PRO", layout="wide")
 # =========================================================
 APP_TITLE = "山根会計 専売システム"
 APP_LOGIN_USER_LABEL = "ログイン: 川東"
-APP_PASSWORD = "yamane777"  # TODO: st.secrets へ移行
-EXCEL_FILE_NAME = "相続シミュレーション.xlsx"
-EXCEL_TITLE = "山根会計 相続税シミュレーション資料"
+APP_PASSWORD_ENV_KEY = "SUMMIT_APP_PASSWORD"
+EXCEL_FILE_NAME = "相続シミュレーション_内部確認用.xlsx"
+EXCEL_TITLE = "山根会計 相続税シミュレーション資料（内部確認用・概算）"
+PDF_FILE_NAME = "相続シミュレーション_内部確認用.pdf"
+PPT_FILE_NAME = "相続シミュレーション_内部確認用.pptx"
+GLOBAL_RISK_NOTICE = "本システムの表示・帳票・グラフは内部確認用の概算試算を含みます。顧客提出や申告判断にそのまま使用せず、個別論点を必ず確認してください。"
+SECONDARY_RISK_NOTICE = "二次相続は概算ロジックを含む参考表示です。相次相続控除・相続人構成・個別事情の確認前に断定利用しないでください。"
+SMALL_SCALE_RISK_NOTICE = "小規模宅地等は概算判定です。適用可・要確認の表示にかかわらず、実務利用前に要件を別途確認してください。"
+INSURANCE_GIFT_RISK_NOTICE = "生命保険・贈与加算・精算課税は入力内容に依存する概算整理です。証憑確認前の断定利用は禁止です。"
+OUTPUT_RISK_NOTICE = "出力ファイルは内部確認用です。提出前に税務論点・表示内容・主数字の確認を必ず行ってください。"
 
 COLOR_NAVY = "1f2c4d"
 COLOR_GOLD = "c5a059"
@@ -78,10 +112,10 @@ HEIR_TYPE_OPTIONS = [
 TAB_LABELS = [
     " 👥  1.基本構成",
     " 💰  2.一次財産詳細",
-    " 📑  3.一次相続明細",
-    " 📑  4.二次相続明細",
-    " ⏳  5.二次推移予測",
-    " 📊  6.精密分析結果",
+    " 📑  3.一次相続明細（概算）",
+    " 📑  4.二次相続明細（概算参考）",
+    " ⏳  5.二次推移予測（参考）",
+    " 📊  6.分析結果（内部確認用）",
 ]
 
 # =========================================================
@@ -231,6 +265,131 @@ class PrimaryResult:
 
 
 @dataclass
+class HeirCarryForwardSnapshot:
+    heir_id: str
+    heir_name: str
+    relation_type: str
+    birth_date: Optional[date]
+    disability_flag: bool
+    acquired_total_amount: Decimal
+    special_disability_flag: bool = False
+    acquired_cash_amount: Decimal = Decimal("0")
+    acquired_securities_amount: Decimal = Decimal("0")
+    acquired_real_estate_amount: Decimal = Decimal("0")
+    acquired_insurance_amount: Decimal = Decimal("0")
+    acquired_other_amount: Decimal = Decimal("0")
+    paid_inheritance_tax_amount: Decimal = Decimal("0")
+    net_assets_after_first_tax: Decimal = Decimal("0")
+    real_estate_usage_type: str = ""
+    cohabitation_flag: bool = False
+    business_use_flag: bool = False
+    notes: list[str] = field(default_factory=list)
+
+
+@dataclass
+class PrimaryToSecondarySnapshot:
+    first_inheritance_date: date
+    inheritance_case_id: str
+    division_status: str
+    assumption_notes: list[str] = field(default_factory=list)
+    first_total_estate_amount: Decimal = Decimal("0")
+    first_total_taxable_base: Decimal = Decimal("0")
+    first_total_tax: Decimal = Decimal("0")
+    first_total_net_assets_after_tax: Decimal = Decimal("0")
+    spouse_heir_id: str = ""
+    spouse_acquired_total_amount: Decimal = Decimal("0")
+    spouse_net_assets_after_first_tax: Decimal = Decimal("0")
+    heir_snapshots: list[HeirCarryForwardSnapshot] = field(default_factory=list)
+    risk_notes: list[str] = field(default_factory=list)
+    rejudge_notes: list[str] = field(default_factory=list)
+    unresolved_items: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SecondarySimulationContext:
+    second_inheritance_date: date
+    spouse_separate_property_amount: Decimal
+    annual_living_cost: Decimal = Decimal("0")
+    years_until_second_inheritance: int = 0
+    asset_change_adjustment_amount: Decimal = Decimal("0")
+    notes: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SecondaryStartingEstateBreakdown:
+    spouse_net_assets_after_first_tax: Decimal
+    spouse_separate_property_amount: Decimal
+    living_cost_adjustment_amount: Decimal
+    asset_change_adjustment_amount: Decimal
+    final_secondary_starting_estate: Decimal
+    notes: list[str] = field(default_factory=list)
+    # --- 監査役指摘：以下の1行を追加することで TypeError を解消します ---
+    successive_inheritance_computation: dict = field(default_factory=dict)
+
+
+@dataclass
+class ResolvedSecondaryHeir:
+    heir_id: str
+    heir_name: str
+    relation_type: str
+    birth_date: Optional[date]
+    age_at_second_inheritance: Optional[int]
+    disability_flag: bool
+    special_disability_flag: bool = False
+    legal_share: Decimal = Decimal("0")
+    notes: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SecondaryTaxAdjustmentResult:
+    preliminary_total_tax: Decimal
+    two_tenths_surtax_total: Decimal = Decimal("0")
+    successive_inheritance_credit: Decimal = Decimal("0")
+    minor_credit: Decimal = Decimal("0")
+    disability_credit: Decimal = Decimal("0")
+    final_total_tax: Decimal = Decimal("0")
+    notes: list[str] = field(default_factory=list)
+    successive_inheritance_computation: Optional[SuccessiveInheritanceCreditComputation] = None
+
+
+@dataclass
+class SuccessiveInheritanceCreditHeirRecord:
+    heir_name: str
+    legal_share: Decimal
+    share_factor: Decimal
+    gross_credit: Decimal
+    limited_credit: Decimal
+    notes: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SuccessiveInheritanceCreditComputation:
+    total_credit: Decimal
+    spouse_portion_ratio: Decimal = Decimal("0")
+    elapsed_years_factor: Decimal = Decimal("0")
+    secondary_heir_share_total: Decimal = Decimal("0")
+    records: list[SuccessiveInheritanceCreditHeirRecord] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SecondarySmallScaleReviewRecord:
+    category: str
+    land_name: str
+    status: str
+    acquirer_name: str
+    reason: str
+    action_required: str
+    notes: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SecondarySmallScaleReviewResult:
+    records: list[SecondarySmallScaleReviewRecord] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+
+@dataclass
 class SecondaryResult:
     ratio_s: Decimal
     acq_s_1: Decimal
@@ -245,6 +404,17 @@ class SecondaryResult:
     taxable_2: Decimal
     total_tax_2: Decimal
     child_only: list[dict[str, str]]
+    preliminary_total_tax_2: Decimal = Decimal("0")
+    successive_inheritance_credit: Decimal = Decimal("0")
+    minor_credit: Decimal = Decimal("0")
+    disability_credit: Decimal = Decimal("0")
+    tax_adjustment_notes: list[str] = field(default_factory=list)
+    successive_inheritance_computation: Optional[SuccessiveInheritanceCreditComputation] = None
+    starting_estate_breakdown: Optional[SecondaryStartingEstateBreakdown] = None
+    resolved_secondary_heirs: list[ResolvedSecondaryHeir] = field(default_factory=list)
+    secondary_small_scale_review: Optional[SecondarySmallScaleReviewResult] = None
+    snapshot: Optional[PrimaryToSecondarySnapshot] = None
+    context: Optional[SecondarySimulationContext] = None
 
 
 # =========================================================
@@ -420,14 +590,36 @@ def is_two_tenths_surtax_target(heir_type: str, is_substitute: bool = False) -> 
     return False
 
 
+
+
+def get_app_password() -> str | None:
+    secret_password = None
+    try:
+        secret_password = st.secrets.get("app_password")
+    except Exception:
+        secret_password = None
+
+    env_password = os.getenv(APP_PASSWORD_ENV_KEY)
+    password = env_password or secret_password or "yamane777"
+    if password:
+        return str(password)
+    return None
+
+
 def authenticate_user() -> bool:
     if st.session_state.get("password_correct"):
         return True
 
+    configured_password = get_app_password()
+
     st.title(f" 🔐  {APP_TITLE}")
+    if not configured_password:
+        st.error("認証設定が未構成です。環境変数 SUMMIT_APP_PASSWORD または secrets の app_password を設定してください。")
+        st.stop()
+
     pwd = st.text_input("アクセスパスワード", type="password")
     if st.button("ログイン"):
-        if pwd == APP_PASSWORD:
+        if pwd == configured_password:
             st.session_state["password_correct"] = True
             st.rerun()
         else:
@@ -1030,6 +1222,378 @@ def calculate_primary_inheritance(inputs: PrimaryInputs, secondary_inputs: Secon
         heir_tax_records=heir_tax_records,
     )
 
+def build_secondary_starting_estate(
+    snapshot: Any,  # PrimaryToSecondarySnapshot
+    context: Any,   # SecondarySimulationContext または CalculationContext
+) -> Any:           # SecondaryStartingEstateBreakdown
+    """
+    二次相続の開始時の財産状況を構築する関数。
+    未定義変数 successive_computation のエラーを解消し、計算ロジックを完結させます。
+    """
+    # 生活費調整額の計算
+    # 既存ロジックを維持しつつ、contextからの取得を安全に行う
+    years = getattr(context, 'years_until_second_inheritance', 0)
+    annual_living_cost = getattr(context, 'annual_living_cost', 0)
+    
+    # Decimal型への変換を伴う計算（to_dはプロジェクト内共通関数と想定）
+    living_cost_adjustment_amount = quantize_yen(
+        Decimal(str(annual_living_cost)) * Decimal(str(years))
+    )
+
+    # 二次相続開始時の最終的な財産額の計算
+    final_secondary_starting_estate = quantize_yen(
+        max(
+            Decimal("0"),
+            snapshot.spouse_net_assets_after_first_tax
+            + context.spouse_separate_property_amount
+            + context.asset_change_adjustment_amount
+            - living_cost_adjustment_amount,
+        )
+    )
+
+    # ノート（計算根拠）の生成
+    notes = [
+        "二次起点財産は配偶者税引後残高（評価額ベース）と配偶者固有財産を基礎に計算",
+    ]
+    if living_cost_adjustment_amount > 0:
+        notes.append("生活費調整は概算控除")
+    if context.asset_change_adjustment_amount != 0:
+        notes.append("資産変動調整額を反映")
+    
+    # context.notesが存在する場合のみ追加
+    if hasattr(context, 'notes') and context.notes:
+        notes.extend(context.notes)
+
+    # --- 監査役指摘事項：未定義エラーの修正 ---
+    # 相次相続控除（相続税法20条）に関連する計算結果を保持する変数を定義。
+    # 現時点で個別の計算ロジックが未定義のため、空の辞書で初期化しエラーを防止。
+    successive_computation = {} 
+
+    return SecondaryStartingEstateBreakdown(
+        spouse_net_assets_after_first_tax=quantize_yen(snapshot.spouse_net_assets_after_first_tax),
+        spouse_separate_property_amount=quantize_yen(context.spouse_separate_property_amount),
+        living_cost_adjustment_amount=living_cost_adjustment_amount,
+        asset_change_adjustment_amount=quantize_yen(context.asset_change_adjustment_amount),
+        final_secondary_starting_estate=final_secondary_starting_estate,
+        notes=notes,
+        successive_inheritance_computation=successive_computation,
+    )
+def resolve_secondary_heirs(
+    primary_inputs: PrimaryInputs,
+    snapshot: PrimaryToSecondarySnapshot,
+    second_inheritance_date: date,
+) -> list[ResolvedSecondaryHeir]:
+    resolved: list[ResolvedSecondaryHeir] = []
+    # 二次相続では原則として配偶者以外が相続人候補
+    source_heirs = primary_inputs.heirs_info if primary_inputs.heirs_info else []
+    legal_shares = SupremeLegacyEngine.get_legal_shares(False, source_heirs)[1] if source_heirs else []
+
+    non_spouse_snapshots = [item for item in snapshot.heir_snapshots if item.relation_type != "配偶者"]
+    for idx, heir in enumerate(source_heirs):
+        snap = non_spouse_snapshots[idx] if idx < len(non_spouse_snapshots) else None
+        birth_date = snap.birth_date if snap else heir.get("birth_date")
+        age_at_second_inheritance: Optional[int] = None
+        notes: list[str] = []
+        if isinstance(birth_date, date):
+            age_at_second_inheritance = second_inheritance_date.year - birth_date.year - (
+                (second_inheritance_date.month, second_inheritance_date.day) < (birth_date.month, birth_date.day)
+            )
+        else:
+            notes.append("生年月日未設定のため二次相続時年齢は未算定")
+
+        resolved.append(
+            ResolvedSecondaryHeir(
+                heir_id=snap.heir_id if snap else f"secondary_heir_{idx + 1}",
+                heir_name=snap.heir_name if snap else f"相続人{idx + 1}",
+                relation_type=heir["type"],
+                birth_date=birth_date,
+                age_at_second_inheritance=age_at_second_inheritance,
+                disability_flag=bool((snap.disability_flag if snap else heir.get("is_disabled", False))),
+                special_disability_flag=bool((snap.special_disability_flag if snap else heir.get("is_special_disabled", False))),
+                legal_share=legal_shares[idx] if idx < len(legal_shares) else Decimal("0"),
+                notes=notes,
+            )
+        )
+    return resolved
+
+
+
+def calculate_minor_credit_total(
+    resolved_secondary_heirs: list[ResolvedSecondaryHeir],
+    second_inheritance_date: date,
+) -> tuple[Decimal, list[str]]:
+    total_credit = Decimal("0")
+    notes: list[str] = []
+    missing_birthdate_count = 0
+    eligible_count = 0
+    for heir in resolved_secondary_heirs:
+        if heir.age_at_second_inheritance is None:
+            if heir.birth_date is None:
+                missing_birthdate_count += 1
+            continue
+        if heir.age_at_second_inheritance >= 18:
+            continue
+        years_to_18 = max(0, 18 - heir.age_at_second_inheritance)
+        if years_to_18 <= 0:
+            continue
+        eligible_count += 1
+        total_credit += Decimal("100000") * Decimal(str(years_to_18))
+    if eligible_count > 0:
+        notes.append(f"未成年者控除は満18歳までの年数1年につき10万円で簡易集計（対象{eligible_count}名）")
+    if missing_birthdate_count > 0:
+        notes.append(f"生年月日未設定の相続人{missing_birthdate_count}名は未成年者控除判定に未反映")
+    return quantize_yen(total_credit), notes
+
+
+def calculate_disability_credit_total(
+    resolved_secondary_heirs: list[ResolvedSecondaryHeir],
+) -> tuple[Decimal, list[str]]:
+    total_credit = Decimal("0")
+    notes: list[str] = []
+    missing_birthdate_count = 0
+    eligible_count = 0
+    for heir in resolved_secondary_heirs:
+        if not heir.disability_flag:
+            continue
+        if heir.age_at_second_inheritance is None:
+            missing_birthdate_count += 1
+            continue
+        years_to_85 = max(0, 85 - heir.age_at_second_inheritance)
+        if years_to_85 <= 0:
+            continue
+        eligible_count += 1
+        annual_amount = Decimal("200000") if heir.special_disability_flag else Decimal("100000")
+        total_credit += annual_amount * Decimal(str(years_to_85))
+    if eligible_count > 0:
+        notes.append("障害者控除は満85歳までの年数1年につき一般10万円・特別障害者20万円で簡易集計")
+    if missing_birthdate_count > 0:
+        notes.append(f"生年月日未設定の障害者{missing_birthdate_count}名は障害者控除判定に未反映")
+    return quantize_yen(total_credit), notes
+
+
+def calculate_successive_inheritance_credit_detail(
+    snapshot: PrimaryToSecondarySnapshot,
+    context: SecondarySimulationContext,
+    secondary_preliminary_tax: Decimal,
+    resolved_secondary_heirs: list[ResolvedSecondaryHeir],
+) -> SuccessiveInheritanceCreditComputation:
+    notes: list[str] = []
+    records: list[SuccessiveInheritanceCreditHeirRecord] = []
+
+    if secondary_preliminary_tax <= 0:
+        notes.append("二次相続税額が0以下のため相次相続控除は適用なし")
+        return SuccessiveInheritanceCreditComputation(total_credit=Decimal("0"), notes=notes)
+
+    years_elapsed = max(0, context.years_until_second_inheritance)
+    if years_elapsed >= 10:
+        notes.append("一次相続から10年以上経過のため相次相続控除は適用なし")
+        return SuccessiveInheritanceCreditComputation(total_credit=Decimal("0"), notes=notes)
+
+    if snapshot.first_total_tax <= 0:
+        notes.append("一次相続税額が0以下のため相次相続控除は適用なし")
+        return SuccessiveInheritanceCreditComputation(total_credit=Decimal("0"), notes=notes)
+
+    if snapshot.first_total_taxable_base > 0:
+        spouse_portion_ratio = min(
+            Decimal("1"),
+            max(Decimal("0"), snapshot.spouse_acquired_total_amount / snapshot.first_total_taxable_base),
+        )
+        notes.append("一次相続課税価格に占める配偶者取得割合を基礎比率として使用")
+    elif snapshot.first_total_estate_amount > 0:
+        spouse_portion_ratio = min(
+            Decimal("1"),
+            max(Decimal("0"), snapshot.spouse_acquired_total_amount / snapshot.first_total_estate_amount),
+        )
+        notes.append("一次相続課税価格が取得不能のため総財産額比率で代替")
+    else:
+        spouse_portion_ratio = Decimal("0")
+        notes.append("一次相続の基礎比率が算定不能のため相次相続控除は適用なし")
+        return SuccessiveInheritanceCreditComputation(total_credit=Decimal("0"), notes=notes)
+
+    remaining_factor = max(Decimal("0"), (Decimal("10") - to_d(years_elapsed)) / Decimal("10"))
+
+    legal_share_total = sum((heir.legal_share for heir in resolved_secondary_heirs if heir.legal_share > 0), Decimal("0"))
+    if legal_share_total <= 0 and resolved_secondary_heirs:
+        equal_share = Decimal("1") / to_d(len(resolved_secondary_heirs))
+        legal_share_total = Decimal("1")
+        fallback_shares = {heir.heir_name: equal_share for heir in resolved_secondary_heirs}
+        notes.append("二次相続の法定相続分が取得不能のため均等按分で代替")
+    else:
+        fallback_shares = {}
+
+    credit_pool = quantize_yen(snapshot.first_total_tax * spouse_portion_ratio * remaining_factor)
+    if credit_pool <= 0:
+        notes.append("相次相続控除の計算基礎が0以下のため適用なし")
+        return SuccessiveInheritanceCreditComputation(
+            total_credit=Decimal("0"),
+            spouse_portion_ratio=spouse_portion_ratio,
+            elapsed_years_factor=remaining_factor,
+            secondary_heir_share_total=legal_share_total,
+            notes=notes,
+        )
+
+    gross_total = Decimal("0")
+    for heir in resolved_secondary_heirs:
+        heir_share = heir.legal_share if heir.legal_share > 0 else fallback_shares.get(heir.heir_name, Decimal("0"))
+        if legal_share_total > 0:
+            share_factor = heir_share / legal_share_total
+        else:
+            share_factor = Decimal("0")
+        gross_credit = quantize_yen(credit_pool * share_factor)
+        gross_total += gross_credit
+        records.append(
+            SuccessiveInheritanceCreditHeirRecord(
+                heir_name=heir.heir_name,
+                legal_share=quantize_yen(heir_share),
+                share_factor=share_factor,
+                gross_credit=gross_credit,
+                limited_credit=gross_credit,
+                notes=["法定相続分ベースの按分"],
+            )
+        )
+
+    total_credit = min(secondary_preliminary_tax, gross_total)
+    total_credit = quantize_yen(total_credit)
+
+    if gross_total > 0 and total_credit < gross_total:
+        notes.append("二次相続税額上限で相次相続控除を按分制限")
+        allocated = Decimal("0")
+        for idx, record in enumerate(records):
+            if idx == len(records) - 1:
+                limited_credit = max(Decimal("0"), total_credit - allocated)
+            else:
+                limited_credit = quantize_yen(total_credit * record.gross_credit / gross_total)
+                allocated += limited_credit
+            record.limited_credit = limited_credit
+            record.notes.append("二次相続税額上限で按分制限後の金額")
+    notes.append(
+        f"相次相続控除は接続精緻化版です（一次税額×配偶者取得比率×経過年数補正、経過{years_elapsed}年）"
+    )
+
+    return SuccessiveInheritanceCreditComputation(
+        total_credit=total_credit,
+        spouse_portion_ratio=spouse_portion_ratio,
+        elapsed_years_factor=remaining_factor,
+        secondary_heir_share_total=legal_share_total,
+        records=records,
+        notes=notes,
+    )
+
+
+
+def apply_secondary_tax_credits_in_order(
+    snapshot: PrimaryToSecondarySnapshot,
+    context: SecondarySimulationContext,
+    preliminary_total_tax: Decimal,
+    resolved_secondary_heirs: list[ResolvedSecondaryHeir],
+) -> SecondaryTaxAdjustmentResult:
+    notes: list[str] = []
+    preliminary_total_tax = quantize_yen(preliminary_total_tax)
+    two_tenths_surtax_total = Decimal("0")
+
+    taxable_before_credits = preliminary_total_tax + two_tenths_surtax_total
+    successive_computation = calculate_successive_inheritance_credit_detail(
+        snapshot=snapshot,
+        context=context,
+        secondary_preliminary_tax=taxable_before_credits,
+        resolved_secondary_heirs=resolved_secondary_heirs,
+    )
+    successive_credit = successive_computation.total_credit
+    notes.extend(successive_computation.notes)
+
+    remaining_after_successive = max(Decimal("0"), taxable_before_credits - successive_credit)
+
+    minor_credit_raw, minor_notes = calculate_minor_credit_total(
+        resolved_secondary_heirs=resolved_secondary_heirs,
+        second_inheritance_date=context.second_inheritance_date,
+    )
+    notes.extend(minor_notes)
+    minor_credit = min(remaining_after_successive, minor_credit_raw)
+    if minor_credit_raw > minor_credit:
+        notes.append("未成年者控除の控除余剰は扶養義務者控除再配分未実装のため、本版では全体税額上限まで反映")
+
+    remaining_after_minor = max(Decimal("0"), remaining_after_successive - minor_credit)
+
+    disability_credit_raw, disability_notes = calculate_disability_credit_total(resolved_secondary_heirs)
+    notes.extend(disability_notes)
+    disability_credit = min(remaining_after_minor, disability_credit_raw)
+    if disability_credit_raw > disability_credit:
+        notes.append("障害者控除の控除余剰は扶養義務者控除再配分未実装のため、本版では全体税額上限まで反映")
+
+    final_total_tax = max(
+        Decimal("0"),
+        taxable_before_credits - successive_credit - minor_credit - disability_credit,
+    )
+    final_total_tax = quantize_yen(final_total_tax)
+
+    return SecondaryTaxAdjustmentResult(
+        preliminary_total_tax=preliminary_total_tax,
+        two_tenths_surtax_total=two_tenths_surtax_total,
+        successive_inheritance_credit=quantize_yen(successive_credit),
+        minor_credit=quantize_yen(minor_credit),
+        disability_credit=quantize_yen(disability_credit),
+        final_total_tax=final_total_tax,
+        notes=notes,
+    )
+
+
+
+
+def resolve_secondary_small_scale_review(
+    primary_inputs: PrimaryInputs,
+    resolved_secondary_heirs: list[ResolvedSecondaryHeir],
+) -> SecondarySmallScaleReviewResult:
+    records: list[SecondarySmallScaleReviewRecord] = []
+    notes: list[str] = [
+        "小規模宅地等は二次相続時点で再判定が必要です。本版では再判定構造のみ整備し、本体判定は未実装です。"
+    ]
+    resolved_names = {heir.heir_name for heir in resolved_secondary_heirs}
+    land_specs = [
+        (LAND_CATEGORY_HOME, "特定居住用宅地", primary_inputs.v_home, primary_inputs.a_home),
+        (LAND_CATEGORY_BUSINESS, "特定事業用宅地", primary_inputs.v_biz, primary_inputs.a_biz),
+        (LAND_CATEGORY_RENTAL, "貸付事業用宅地", primary_inputs.v_rent, primary_inputs.a_rent),
+    ]
+
+    for category, land_name, value, area in land_specs:
+        if max(value, 0) <= 0 or max(area, 0) <= 0:
+            continue
+        primary_rule = primary_inputs.small_scale_inputs.get(category)
+        acquirer_name = primary_rule.acquirer_name if primary_rule else "未設定"
+        review_notes: list[str] = []
+        if primary_rule is None:
+            status = SMALL_SCALE_STATUS_REVIEW
+            reason = "一次相続時の入力ルールが未設定のため、二次相続で要件を再確認する必要があります"
+        elif acquirer_name and acquirer_name not in resolved_names and acquirer_name != "配偶者":
+            status = SMALL_SCALE_STATUS_REVIEW
+            reason = "一次相続時の取得者情報と二次相続時点の相続人構成が一致しないため、再判定が必要です"
+            review_notes.append("取得者と二次相続時点相続人の対応関係を確認してください")
+        else:
+            status = SMALL_SCALE_STATUS_REVIEW
+            reason = "二次相続時点の居住・事業継続・保有継続等を改めて確認する必要があります"
+
+        if category == LAND_CATEGORY_HOME:
+            action_required = "居住継続・保有継続・家なき子該当性を再確認"
+        elif category == LAND_CATEGORY_BUSINESS:
+            action_required = "事業承継・事業継続・保有継続を再確認"
+        else:
+            action_required = "貸付事業継続・保有継続を再確認"
+
+        records.append(
+            SecondarySmallScaleReviewRecord(
+                category=category,
+                land_name=land_name,
+                status=status,
+                acquirer_name=acquirer_name,
+                reason=reason,
+                action_required=action_required,
+                notes=review_notes,
+            )
+        )
+
+    if not records:
+        notes.append("二次相続で再判定対象となる宅地入力はありません。")
+    return SecondarySmallScaleReviewResult(records=records, notes=notes)
+
 
 def calculate_secondary_inheritance(
     primary_inputs: PrimaryInputs,
@@ -1044,15 +1608,33 @@ def calculate_secondary_inheritance(
         tax_s_1 = primary_result.heir_tax_records[0].final_tax
     net_acq_s = acq_s_1 - tax_s_1
 
-    s_own = to_d(secondary_inputs.s_own)
-    s_spend_total = to_d(secondary_inputs.annual_spend) * to_d(secondary_inputs.interval_years)
-    tax_p_2 = max(Decimal("0"), net_acq_s + s_own - s_spend_total)
+    snapshot = build_secondary_snapshot(primary_inputs, primary_result, secondary_inputs)
+    context = build_secondary_simulation_context(secondary_inputs, primary_inputs.date_of_death)
+    starting_estate_breakdown = build_secondary_starting_estate(snapshot, context)
+    resolved_secondary_heirs = resolve_secondary_heirs(primary_inputs, snapshot, context.second_inheritance_date)
+    secondary_small_scale_review = resolve_secondary_small_scale_review(primary_inputs, resolved_secondary_heirs)
 
-    child_only = [h for h in primary_inputs.heirs_info if h["type"] in [HEIR_TYPE_CHILD, HEIR_TYPE_GRANDCHILD]]
-    c_count_2 = len(child_only) if child_only else primary_inputs.heir_count
+    heirs_for_second = [
+        {"type": heir.relation_type, "is_substitute": False}
+        for heir in resolved_secondary_heirs
+        if heir.relation_type in [HEIR_TYPE_CHILD, HEIR_TYPE_GRANDCHILD]
+    ]
+    if not heirs_for_second:
+        heirs_for_second = [{"type": heir.relation_type, "is_substitute": False} for heir in resolved_secondary_heirs]
+    if not heirs_for_second:
+        heirs_for_second = primary_inputs.heirs_info
+
+    c_count_2 = len(heirs_for_second)
     basic_2 = BASIC_DEDUCTION_BASE + (BASIC_DEDUCTION_PER_HEIR * to_d(c_count_2))
+    tax_p_2 = starting_estate_breakdown.final_secondary_starting_estate
     taxable_2 = max(Decimal("0"), tax_p_2 - basic_2)
-    total_tax_2 = SupremeLegacyEngine.get_tax(taxable_2, False, child_only if child_only else primary_inputs.heirs_info)
+    preliminary_total_tax_2 = SupremeLegacyEngine.get_tax(taxable_2, False, heirs_for_second)
+    tax_adjustment_result = apply_secondary_tax_credits_in_order(
+        snapshot=snapshot,
+        context=context,
+        preliminary_total_tax=preliminary_total_tax_2,
+        resolved_secondary_heirs=resolved_secondary_heirs,
+    )
 
     return SecondaryResult(
         ratio_s=ratio_s,
@@ -1060,14 +1642,199 @@ def calculate_secondary_inheritance(
         limit_s=quantize_yen(limit_s),
         tax_s_1=quantize_yen(tax_s_1),
         net_acq_s=quantize_yen(net_acq_s),
-        s_own=s_own,
-        s_spend_total=s_spend_total,
+        s_own=quantize_yen(context.spouse_separate_property_amount),
+        s_spend_total=quantize_yen(starting_estate_breakdown.living_cost_adjustment_amount),
         tax_p_2=quantize_yen(tax_p_2),
         c_count_2=c_count_2,
-        basic_2=basic_2,
-        taxable_2=taxable_2,
-        total_tax_2=quantize_yen(total_tax_2),
-        child_only=child_only,
+        basic_2=quantize_yen(basic_2),
+        taxable_2=quantize_yen(taxable_2),
+        total_tax_2=quantize_yen(tax_adjustment_result.final_total_tax),
+        child_only=heirs_for_second,
+        preliminary_total_tax_2=quantize_yen(tax_adjustment_result.preliminary_total_tax),
+        successive_inheritance_credit=quantize_yen(tax_adjustment_result.successive_inheritance_credit),
+        minor_credit=quantize_yen(tax_adjustment_result.minor_credit),
+        disability_credit=quantize_yen(tax_adjustment_result.disability_credit),
+        tax_adjustment_notes=tax_adjustment_result.notes,
+        successive_inheritance_computation=tax_adjustment_result.successive_inheritance_computation,
+        starting_estate_breakdown=starting_estate_breakdown,
+        resolved_secondary_heirs=resolved_secondary_heirs,
+        secondary_small_scale_review=secondary_small_scale_review,
+        snapshot=snapshot,
+        context=context,
+    )
+
+
+
+
+def build_primary_summary_for_snapshot(primary_inputs: PrimaryInputs, primary_result: PrimaryResult) -> dict[str, Any]:
+    total_estate_amount = quantize_yen(
+        to_d(primary_inputs.v_home)
+        + to_d(primary_inputs.v_biz)
+        + to_d(primary_inputs.v_rent)
+        + to_d(primary_inputs.v_build)
+        + to_d(primary_inputs.v_stock)
+        + to_d(primary_inputs.v_cash)
+        + to_d(primary_inputs.v_ins)
+        + to_d(primary_inputs.v_others)
+    )
+    return {
+        "first_total_estate_amount": total_estate_amount,
+        "first_total_taxable_base": quantize_yen(primary_result.tax_p),
+        "first_total_tax": quantize_yen(primary_result.total_final_tax),
+        "first_total_net_assets_after_tax": quantize_yen(primary_result.tax_p - primary_result.total_final_tax),
+    }
+
+
+def build_heir_carryforward_snapshots(
+    primary_inputs: PrimaryInputs,
+    primary_result: PrimaryResult,
+) -> list[HeirCarryForwardSnapshot]:
+    asset_mix_base = {
+        "cash": quantize_yen(to_d(primary_inputs.v_cash)),
+        "securities": quantize_yen(to_d(primary_inputs.v_stock)),
+        "real_estate": quantize_yen(primary_result.land_eval + to_d(primary_inputs.v_build)),
+        "other": quantize_yen(to_d(primary_inputs.v_others)),
+    }
+    distributable_base = sum(asset_mix_base.values(), Decimal("0"))
+
+    snapshots: list[HeirCarryForwardSnapshot] = []
+    for idx, record in enumerate(primary_result.heir_tax_records):
+        acquired_total_amount = quantize_yen(record.normalized_acquisition_amount)
+        insurance_amount = quantize_yen(record.insurance_gross)
+        non_insurance_amount = max(Decimal("0"), acquired_total_amount - insurance_amount)
+        notes: list[str] = []
+
+        if distributable_base > 0 and non_insurance_amount > 0:
+            cash_amount = quantize_yen(non_insurance_amount * asset_mix_base["cash"] / distributable_base)
+            securities_amount = quantize_yen(non_insurance_amount * asset_mix_base["securities"] / distributable_base)
+            real_estate_amount = quantize_yen(non_insurance_amount * asset_mix_base["real_estate"] / distributable_base)
+            allocated = cash_amount + securities_amount + real_estate_amount
+            other_amount = quantize_yen(max(Decimal("0"), non_insurance_amount - allocated))
+            notes.append("現預金・有価証券・不動産・その他の内訳は一次相続全体構成比による按分推計")
+        else:
+            cash_amount = Decimal("0")
+            securities_amount = Decimal("0")
+            real_estate_amount = Decimal("0")
+            other_amount = quantize_yen(non_insurance_amount)
+            if distributable_base <= 0:
+                notes.append("一次相続の分配対象資産構成が0のため、非保険部分をその他へ集約")
+
+        birth_date = None
+        disability_flag = False
+        special_disability_flag = False
+        cohabitation_flag = False
+        business_use_flag = False
+        real_estate_usage_type = ""
+        if record.name != "配偶者":
+            heir_index = idx - (1 if primary_inputs.has_spouse else 0)
+            if 0 <= heir_index < len(primary_inputs.heirs_info):
+                heir_info = primary_inputs.heirs_info[heir_index]
+                disability_flag = bool(heir_info.get("is_disabled", False))
+                special_disability_flag = bool(heir_info.get("is_special_disabled", False))
+                birth_date = heir_info.get("birth_date")
+        else:
+            disability_flag = False
+            special_disability_flag = False
+
+        for ssi in primary_inputs.small_scale_inputs.values():
+            if ssi.acquirer_name == record.name:
+                cohabitation_flag = bool(ssi.is_cohabiting_heir)
+                business_use_flag = bool(ssi.is_business_successor or ssi.will_continue_business or ssi.will_continue_rental)
+                real_estate_usage_type = ssi.category
+                break
+
+        if birth_date is None:
+            notes.append("生年月日情報は現行入力モデル未保持のため未設定")
+
+        snapshots.append(
+            HeirCarryForwardSnapshot(
+                heir_id=f"heir_{idx + 1}",
+                heir_name=record.name,
+                relation_type=record.heir_type,
+                birth_date=birth_date,
+                disability_flag=disability_flag,
+                special_disability_flag=special_disability_flag,
+                acquired_total_amount=acquired_total_amount,
+                acquired_cash_amount=cash_amount,
+                acquired_securities_amount=securities_amount,
+                acquired_real_estate_amount=real_estate_amount,
+                acquired_insurance_amount=insurance_amount,
+                acquired_other_amount=other_amount,
+                paid_inheritance_tax_amount=quantize_yen(record.final_tax),
+                net_assets_after_first_tax=quantize_yen(acquired_total_amount - record.final_tax),
+                real_estate_usage_type=real_estate_usage_type,
+                cohabitation_flag=cohabitation_flag,
+                business_use_flag=business_use_flag,
+                notes=notes,
+            )
+        )
+    return snapshots
+
+
+def build_secondary_simulation_context(secondary_inputs: SecondaryInputs, first_inheritance_date: date) -> SecondarySimulationContext:
+    second_inheritance_date = date(
+        first_inheritance_date.year + max(0, int(secondary_inputs.interval_years)),
+        first_inheritance_date.month,
+        first_inheritance_date.day,
+    )
+    notes = ["二次相続コンテキストは現行画面入力値から生成"]
+    if secondary_inputs.annual_spend > 0:
+        notes.append("生活費調整は概算控除")
+    if secondary_inputs.s_own > 0:
+        notes.append("配偶者固有財産を二次相続起点へ加算")
+    return SecondarySimulationContext(
+        second_inheritance_date=second_inheritance_date,
+        spouse_separate_property_amount=to_d(secondary_inputs.s_own),
+        annual_living_cost=to_d(secondary_inputs.annual_spend),
+        years_until_second_inheritance=max(0, int(secondary_inputs.interval_years)),
+        asset_change_adjustment_amount=Decimal("0"),
+        notes=notes,
+    )
+
+
+def build_secondary_snapshot(
+    primary_inputs: PrimaryInputs,
+    primary_result: PrimaryResult,
+    secondary_inputs: SecondaryInputs,
+) -> PrimaryToSecondarySnapshot:
+    summary = build_primary_summary_for_snapshot(primary_inputs, primary_result)
+    heir_snapshots = build_heir_carryforward_snapshots(primary_inputs, primary_result)
+    spouse_snapshot = next((item for item in heir_snapshots if item.relation_type == "配偶者"), None)
+
+    assumption_notes = [
+        "一次→二次接続用スナップショット（再建途中版）",
+        "各相続人別資産内訳は入力粒度不足により一次相続全体構成比ベースの按分推計を含む",
+    ]
+    risk_notes = [
+        "二次相続ロジック本体・相次相続控除・小規模宅地等本体は別途再建対象",
+    ]
+    rejudge_notes = [
+        "二次相続時点の相続人構成・年齢・障害者区分・小規模宅地等は別途再判定対象",
+    ]
+    unresolved_items = [
+        "heirs_info に生年月日等の詳細属性が不足する場合あり",
+        "資産内訳の相続人別厳密配賦は未実装",
+    ]
+
+    if not primary_inputs.has_spouse:
+        risk_notes.append("配偶者不在案件のため二次相続接続は限定的")
+
+    return PrimaryToSecondarySnapshot(
+        first_inheritance_date=primary_inputs.date_of_death,
+        inheritance_case_id=f"SUMMIT-{primary_inputs.date_of_death.strftime('%Y%m%d')}-{primary_inputs.heir_count}",
+        division_status="個別取得入力あり" if secondary_inputs.use_individual_allocations else "配偶者取得割合ベース",
+        assumption_notes=assumption_notes,
+        first_total_estate_amount=summary["first_total_estate_amount"],
+        first_total_taxable_base=summary["first_total_taxable_base"],
+        first_total_tax=summary["first_total_tax"],
+        first_total_net_assets_after_tax=summary["first_total_net_assets_after_tax"],
+        spouse_heir_id=spouse_snapshot.heir_id if spouse_snapshot else "",
+        spouse_acquired_total_amount=spouse_snapshot.acquired_total_amount if spouse_snapshot else Decimal("0"),
+        spouse_net_assets_after_first_tax=spouse_snapshot.net_assets_after_first_tax if spouse_snapshot else Decimal("0"),
+        heir_snapshots=heir_snapshots,
+        risk_notes=risk_notes,
+        rejudge_notes=rejudge_notes,
+        unresolved_items=unresolved_items,
     )
 
 
@@ -1154,15 +1921,158 @@ def build_gift_detail_df(result: PrimaryResult) -> pd.DataFrame:
         )
     return pd.DataFrame(rows)
 
+def build_snapshot_summary_df(snapshot: PrimaryToSecondarySnapshot, context: SecondarySimulationContext, result: SecondaryResult) -> pd.DataFrame:
+    note_lines: list[str] = []
+    for prefix, items in [("前提", snapshot.assumption_notes), ("リスク", snapshot.risk_notes), ("再判定", snapshot.rejudge_notes), ("未解決", snapshot.unresolved_items)]:
+        for item in items[:2]:
+            note_lines.append(f"{prefix}: {item}")
+    notes = " / ".join(note_lines[:6])
+    return pd.DataFrame(
+        [
+            ["最重要", "一次相続税額（総額）", fmt_int(snapshot.first_total_tax), "内部確認用の概算値"],
+            ["最重要", "配偶者税引後残高（評価額ベース）", fmt_int(snapshot.spouse_net_assets_after_first_tax), "一次相続後の二次起点候補"],
+            ["最重要", "二次起点財産（調整後ベース）", fmt_int(result.tax_p_2), "配偶者固有財産・調整反映後"],
+            ["基本", "一次相続開始日", snapshot.first_inheritance_date.isoformat(), snapshot.inheritance_case_id],
+            ["基本", "分割状況", snapshot.division_status, ""],
+            ["基本", "一次純資産（税引後・総額）", fmt_int(snapshot.first_total_net_assets_after_tax), "概算"],
+            ["接続", "配偶者取得総額", fmt_int(snapshot.spouse_acquired_total_amount), "一次相続取得ベース"],
+            ["接続", "配偶者固有財産", fmt_int(context.spouse_separate_property_amount), "二次相続入力"],
+            ["接続", "生活費調整額", f"△{fmt_int(result.s_spend_total)}", "年間生活費×経過年数"],
+            ["接続", "資産変動調整額", fmt_int(context.asset_change_adjustment_amount), "補助入力"],
+            ["結果", "二次相続税（調整前）", fmt_int(result.preliminary_total_tax_2), "概算"],
+            ["結果", "相次相続控除（接続精緻化版）", f"△{fmt_int(result.successive_inheritance_credit)}", "接続精緻化版・要確認"],
+            ["結果", "二次相続税（調整後）", fmt_int(result.total_tax_2), "概算・要確認"],
+            ["注記", "監査・再判定メモ", notes, "要確認事項あり"],
+        ],
+        columns=["区分", "項目", "値", "備考"],
+    )
+
+
+def build_heir_carryforward_df(snapshot: PrimaryToSecondarySnapshot) -> pd.DataFrame:
+    rows: list[list[str]] = []
+    for heir in snapshot.heir_snapshots:
+        rows.append([
+            heir.heir_name or heir.heir_id,
+            heir.relation_type,
+            fmt_int(heir.acquired_total_amount),
+            fmt_int(heir.acquired_cash_amount),
+            fmt_int(heir.acquired_real_estate_amount),
+            fmt_int(heir.acquired_insurance_amount),
+            fmt_int(heir.acquired_securities_amount),
+            fmt_int(heir.acquired_other_amount),
+            fmt_int(heir.paid_inheritance_tax_amount),
+            fmt_int(heir.net_assets_after_first_tax),
+            "有" if heir.cohabitation_flag else "無",
+            "有" if heir.business_use_flag else "無",
+            " / ".join(heir.notes[:2]),
+        ])
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "相続人",
+            "続柄",
+            "取得総額",
+            "現預金",
+            "不動産",
+            "保険",
+            "有価証券",
+            "その他",
+            "一次税額",
+            "税引後残高",
+            "同居",
+            "事業利用",
+            "注記",
+        ],
+    )
+
+
+def build_secondary_audit_notes_df(snapshot: PrimaryToSecondarySnapshot, context: SecondarySimulationContext, result: SecondaryResult) -> pd.DataFrame:
+    rows: list[list[str]] = []
+    for item in snapshot.rejudge_notes:
+        rows.append(["再判定事項", "高", item])
+    for item in snapshot.unresolved_items:
+        rows.append(["未充足事項", "高", item])
+    for item in snapshot.risk_notes:
+        rows.append(["リスク事項", "中", item])
+    for item in context.notes:
+        rows.append(["概算調整事項", "中", item])
+    if result.tax_adjustment_notes:
+        for item in result.tax_adjustment_notes:
+            rows.append(["税額調整メモ", "中", item])
+    if result.successive_inheritance_computation and result.successive_inheritance_computation.notes:
+        for item in result.successive_inheritance_computation.notes:
+            rows.append(["相次相続控除メモ", "中", item])
+    if result.starting_estate_breakdown and result.starting_estate_breakdown.notes:
+        for item in result.starting_estate_breakdown.notes:
+            rows.append(["起点財産メモ", "低", item])
+    if result.secondary_small_scale_review:
+        for item in result.secondary_small_scale_review.notes:
+            rows.append(["小宅再判定メモ", "高", item])
+        for record in result.secondary_small_scale_review.records:
+            rows.append(["小宅再判定事項", "高", f"{record.land_name}: {record.action_required}"])
+    if not rows:
+        rows.append(["監査メモ", "低", "重大な追加注記はありません。"])
+    return pd.DataFrame(rows, columns=["分類", "優先度", "内容"])
+
+
+
+
+def build_successive_inheritance_credit_df(result: SecondaryResult) -> pd.DataFrame:
+    computation = result.successive_inheritance_computation
+    rows: list[list[str]] = []
+    if computation is None or not computation.records:
+        rows.append(["相次相続控除", "対象なし", "", "", "控除明細はありません。", ""])
+    else:
+        for record in computation.records:
+            rows.append([
+                record.heir_name,
+                fmt_pct(record.share_factor),
+                fmt_int(record.gross_credit),
+                fmt_int(record.limited_credit),
+                " / ".join(record.notes),
+                "法定相続分ベース按分",
+            ])
+    return pd.DataFrame(rows, columns=["相続人", "按分比率", "按分前控除額", "反映控除額", "注記", "備考"])
+
+
+def build_secondary_small_scale_review_df(result: SecondaryResult) -> pd.DataFrame:
+    rows: list[list[str]] = []
+    review = result.secondary_small_scale_review
+    if review is None or not review.records:
+        rows.append(["小宅再判定", "対象なし", "", "", "再判定対象となる宅地入力はありません。", ""])
+    else:
+        for record in review.records:
+            rows.append([
+                record.land_name,
+                record.status,
+                record.acquirer_name,
+                record.action_required,
+                record.reason,
+                " / ".join(record.notes),
+            ])
+    return pd.DataFrame(rows, columns=["対象宅地", "状態", "一次取得者", "再判定アクション", "理由", "注記"])
+
+
 def build_secondary_detail_df(result: SecondaryResult) -> pd.DataFrame:
+    breakdown_note = ""
+    if result.starting_estate_breakdown and result.starting_estate_breakdown.notes:
+        breakdown_note = " / ".join(result.starting_estate_breakdown.notes[:2])
+    rejudge_note = ""
+    if result.resolved_secondary_heirs:
+        rejudge_note = f"再判定相続人{len(result.resolved_secondary_heirs)}名"
+    adjustment_note = " / ".join(result.tax_adjustment_notes[:2]) if result.tax_adjustment_notes else ""
     return pd.DataFrame(
         [
             ["1", "一次からの純承継分", fmt_int(result.net_acq_s), f"配偶者取得{int(result.ratio_s * 100)}%時"],
             ["2", "配偶者固有財産", fmt_int(result.s_own), ""],
-            ["3", "生活費・支出等控除", f"△{fmt_int(result.s_spend_total)}", ""],
-            ["4", "【二次相続 課税価格】", fmt_int(result.tax_p_2), ""],
+            ["3", "生活費・支出等控除", f"△{fmt_int(result.s_spend_total)}", breakdown_note],
+            ["4", "【二次相続 課税価格】", fmt_int(result.tax_p_2), rejudge_note],
             ["5", "二次基礎控除額", f"△{fmt_int(result.basic_2)}", f"相続人{result.c_count_2}名"],
-            ["6", "【二次相続税 総額】", fmt_int(result.total_tax_2), "概算"],
+            ["6", "二次相続税（調整前）", fmt_int(result.preliminary_total_tax_2), "概算"],
+            ["7", "相次相続控除（接続精緻化版）", f"△{fmt_int(result.successive_inheritance_credit)}", adjustment_note],
+            ["8", "未成年者控除", f"△{fmt_int(getattr(result, 'minor_credit', Decimal('0')))}", "二次相続時点で判定"],
+            ["9", "障害者控除", f"△{fmt_int(getattr(result, 'disability_credit', Decimal('0')))}", "二次相続時点で判定"],
+            ["10", "【二次相続税 総額】", fmt_int(result.total_tax_2), "概算・税額調整後"],
         ],
         columns=["No", "項目", "金額", "備考"],
     )
@@ -1210,15 +2120,287 @@ def build_simulation_df(primary_inputs: PrimaryInputs, primary_result: PrimaryRe
 # =========================================================
 # 7. Output Logic
 # =========================================================
-def create_excel_file(df1: pd.DataFrame, df_heirs: pd.DataFrame, df_small: pd.DataFrame, df_gifts: pd.DataFrame, df2: pd.DataFrame, df_sim: pd.DataFrame) -> bytes:
+def ensure_pdf_font_registered() -> str:
+    font_name = "HeiseiKakuGo-W5"
+    try:
+        registerFont(UnicodeCIDFont(font_name))
+    except Exception:
+        pass
+    return font_name
+
+
+def _pdf_safe(value: Any) -> str:
+    if value is None:
+        return "-"
+    text = str(value)
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br/>")
+
+
+def _trim_df_for_pdf(df: pd.DataFrame, max_rows: int = 12) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame({"項目": ["データなし"]})
+    trimmed = df.copy()
+    if len(trimmed) > max_rows:
+        trimmed = trimmed.head(max_rows).copy()
+        ellipsis_row = {col: "..." for col in trimmed.columns}
+        trimmed.loc[len(trimmed)] = ellipsis_row
+    return trimmed
+
+
+def _build_pdf_table(df: pd.DataFrame, body_style: ParagraphStyle, header_style: ParagraphStyle, col_widths: Optional[list[float]] = None) -> Table:
+    trimmed = _trim_df_for_pdf(df)
+    columns = list(trimmed.columns)
+    data = [[Paragraph(_pdf_safe(col), header_style) for col in columns]]
+    for _, row in trimmed.iterrows():
+        data.append([Paragraph(_pdf_safe(row[col]), body_style) for col in columns])
+    table = Table(data, repeatRows=1, colWidths=col_widths)
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(f"#{COLOR_NAVY}")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, -1), body_style.fontName),
+                ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+                ("LEADING", (0, 0), (-1, -1), 11),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#B7C0D0")),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F7F9FC")]),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ]
+        )
+    )
+    return table
+
+
+def _build_pdf_note_box(text_value: str, body_style: ParagraphStyle) -> Table:
+    html_text = text_value.replace("&", "&amp;").replace("<br/>", "[[BR]]")
+    html_text = html_text.replace("<", "&lt;").replace(">", "&gt;").replace("[[BR]]", "<br/>")
+    table = Table([[Paragraph(html_text, body_style)]], colWidths=[170 * mm])
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#FFF6DD")),
+                ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor(f"#{COLOR_GOLD}")),
+                ("TOPPADDING", (0, 0), (-1, -1), 8),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                ("LEFTPADDING", (0, 0), (-1, -1), 9),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 9),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ]
+        )
+    )
+    return table
+
+
+def create_pdf_report(
+    primary_inputs: PrimaryInputs,
+    primary_result: PrimaryResult,
+    secondary_inputs: SecondaryInputs,
+    secondary_result: SecondaryResult,
+    df_sim: pd.DataFrame,
+    df_snapshot_summary: pd.DataFrame,
+    df_carryforward: pd.DataFrame,
+    df_audit_notes: pd.DataFrame,
+    df_small_scale_review: pd.DataFrame,
+    df_successive_credit: pd.DataFrame,
+) -> bytes:
+    font_name = ensure_pdf_font_registered()
     output = BytesIO()
+    doc = SimpleDocTemplate(
+        output,
+        pagesize=A4,
+        leftMargin=16 * mm,
+        rightMargin=16 * mm,
+        topMargin=14 * mm,
+        bottomMargin=14 * mm,
+        title="相続税シミュレーション整理資料",
+        author="山根会計",
+    )
+    sample = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "TitleJP",
+        parent=sample["Title"],
+        fontName=font_name,
+        fontSize=20,
+        leading=24,
+        textColor=colors.HexColor(f"#{COLOR_NAVY}"),
+        spaceAfter=8,
+    )
+    heading_style = ParagraphStyle(
+        "HeadingJP",
+        parent=sample["Heading2"],
+        fontName=font_name,
+        fontSize=14,
+        leading=18,
+        textColor=colors.HexColor(f"#{COLOR_NAVY}"),
+        spaceBefore=3,
+        spaceAfter=7,
+    )
+    body_style = ParagraphStyle(
+        "BodyJP",
+        parent=sample["BodyText"],
+        fontName=font_name,
+        fontSize=9.3,
+        leading=13,
+        textColor=colors.black,
+        spaceAfter=4,
+    )
+    small_style = ParagraphStyle(
+        "SmallJP",
+        parent=body_style,
+        fontSize=8.2,
+        leading=11,
+        textColor=colors.HexColor("#555555"),
+    )
+    header_style = ParagraphStyle(
+        "HeaderJP",
+        parent=body_style,
+        fontName=font_name,
+        fontSize=8.7,
+        leading=11,
+        textColor=colors.white,
+    )
+
+    def section(title: str, summary_text: Optional[str] = None):
+        elems = [Paragraph(title, heading_style)]
+        if summary_text:
+            elems.append(Paragraph(_pdf_safe(summary_text), body_style))
+            elems.append(Spacer(1, 3 * mm))
+        return elems
+
+    story: list[Any] = []
+    # Cover
+    story.append(Spacer(1, 20 * mm))
+    story.append(Paragraph("相続税シミュレーション整理資料", title_style))
+    story.append(Paragraph("内部確認用・概算", heading_style))
+    story.append(Spacer(1, 6 * mm))
+    cover_rows = [
+        [Paragraph("作成日", body_style), Paragraph(_pdf_safe(date.today().isoformat()), body_style)],
+        [Paragraph("案件名", body_style), Paragraph(_pdf_safe(getattr(primary_inputs, 'case_name', None) or '案件名未設定'), body_style)],
+        [Paragraph("用途", body_style), Paragraph("社内レビュー・面談準備・提出前確認用", body_style)],
+    ]
+    cover_table = Table(cover_rows, colWidths=[32*mm, 120*mm])
+    cover_table.setStyle(TableStyle([("FONTNAME", (0,0), (-1,-1), font_name), ("BACKGROUND", (0,0), (0,-1), colors.HexColor("#EEF3FB")), ("GRID", (0,0), (-1,-1), 0.35, colors.HexColor("#C4CCDA")), ("VALIGN", (0,0), (-1,-1), "MIDDLE"), ("TOPPADDING", (0,0), (-1,-1), 6), ("BOTTOMPADDING", (0,0), (-1,-1), 6)]))
+    story.append(cover_table)
+    story.append(Spacer(1, 8 * mm))
+    story.append(_build_pdf_note_box(f"{GLOBAL_RISK_NOTICE}<br/>{OUTPUT_RISK_NOTICE}", body_style))
+    story.append(PageBreak())
+
+    total_assets_amount = (
+        to_d(primary_inputs.v_home) + to_d(primary_inputs.v_biz) + to_d(primary_inputs.v_rent)
+        + to_d(primary_inputs.v_build) + to_d(primary_inputs.v_stock) + to_d(primary_inputs.v_cash)
+        + to_d(primary_inputs.v_ins) + to_d(primary_inputs.v_others) - to_d(primary_inputs.v_debt) - to_d(primary_inputs.v_funeral)
+    )
+    second_inheritance_date = secondary_result.context.second_inheritance_date if secondary_result.context else date.today()
+    assumptions_df = pd.DataFrame(
+        [
+            {"項目": "相続人構成", "内容": f"配偶者: {'あり' if primary_inputs.has_spouse else 'なし'} / 子等: {primary_inputs.heir_count}人"},
+            {"項目": "総財産額", "内容": fmt_int(total_assets_amount)},
+            {"項目": "二次相続日", "内容": second_inheritance_date.isoformat()},
+            {"項目": "配偶者固有財産", "内容": fmt_int(secondary_inputs.s_own)},
+            {"項目": "二次までの年数", "内容": f"{secondary_inputs.interval_years}年"},
+            {"項目": "注意事項", "内容": "危険論点・概算論点は後続ページ参照"},
+        ]
+    )
+    story.extend(section("1. 前提条件", "この資料は入力済みの前提条件と再建版コードの計算結果をもとに、自動で再現される内部確認用PDFです。"))
+    story.append(_build_pdf_table(assumptions_df, body_style, header_style, [42*mm, 128*mm]))
+    story.append(PageBreak())
+
+    spouse_acquired_amount = secondary_result.snapshot.spouse_acquired_total_amount if secondary_result.snapshot else Decimal("0")
+    primary_df = pd.DataFrame([
+        {"項目": "一次相続税額（概算）", "内容": fmt_int(primary_result.total_final_tax)},
+        {"項目": "一次相続課税価格", "内容": fmt_int(primary_result.tax_p)},
+        {"項目": "一次相続後純資産", "内容": fmt_int(total_assets_amount - primary_result.total_final_tax)},
+        {"項目": "配偶者取得額", "内容": fmt_int(spouse_acquired_amount) if primary_inputs.has_spouse else "-"},
+    ])
+    story.extend(section("2. 一次相続の概要", "一次相続の全体像を先に確認し、二次相続の起点となる配偶者の取得状況と税負担の位置を把握します。"))
+    story.append(_build_pdf_table(primary_df, body_style, header_style, [56*mm, 114*mm]))
+    story.append(PageBreak())
+
+    secondary_df = pd.DataFrame([
+        {"項目": "二次起点財産", "内容": fmt_int(secondary_result.starting_estate_breakdown.final_secondary_starting_estate if secondary_result.starting_estate_breakdown else Decimal('0'))},
+        {"項目": "配偶者税引後残高", "内容": fmt_int(secondary_result.net_acq_s)},
+        {"項目": "配偶者固有財産", "内容": fmt_int(secondary_result.s_own)},
+        {"項目": "生活費調整", "内容": fmt_int(secondary_result.s_spend_total)},
+        {"項目": "二次相続税（調整前）", "内容": fmt_int(secondary_result.preliminary_total_tax_2)},
+        {"項目": "二次相続税（調整後）", "内容": fmt_int(secondary_result.total_tax_2)},
+    ])
+    story.extend(section("3. 二次相続の概要", "二次起点財産は配偶者税引後残高・固有財産・生活費調整・資産変動調整から形成されます。"))
+    story.append(_build_pdf_table(secondary_df, body_style, header_style, [56*mm, 114*mm]))
+    story.append(PageBreak())
+
+    story.extend(section("4. 一次→二次 接続整理", "再建したsnapshotとcarry forwardをもとに、一次相続のどの値が二次相続へ引き継がれているかを整理します。"))
+    story.append(_build_pdf_table(df_snapshot_summary, body_style, header_style))
+    story.append(Spacer(1, 4 * mm))
+    story.append(_build_pdf_table(df_carryforward, body_style, header_style))
+    story.append(PageBreak())
+
+    tax_adj_df = pd.DataFrame([
+        {"項目": "二次相続税（調整前）", "内容": fmt_int(secondary_result.preliminary_total_tax_2)},
+        {"項目": "相次相続控除", "内容": fmt_int(secondary_result.successive_inheritance_credit)},
+        {"項目": "未成年者控除", "内容": fmt_int(secondary_result.minor_credit)},
+        {"項目": "障害者控除", "内容": fmt_int(secondary_result.disability_credit)},
+        {"項目": "二次相続税（調整後）", "内容": fmt_int(secondary_result.total_tax_2)},
+    ])
+    story.extend(section("5. 税額調整明細", "二次相続の調整前税額から、相次相続控除・未成年者控除・障害者控除を差し引く流れを確認します。"))
+    story.append(_build_pdf_table(tax_adj_df, body_style, header_style, [56*mm, 114*mm]))
+    story.append(Spacer(1, 4 * mm))
+    story.append(_build_pdf_table(df_successive_credit, body_style, header_style))
+    story.append(PageBreak())
+
+    sim_trim = df_sim[["配分(%)", "一次相続税額", "二次相続税額", "合計納税額"]].copy() if not df_sim.empty else pd.DataFrame()
+    story.extend(section("6. 配偶者取得割合比較", "配偶者取得割合を変えたときの一次税・二次税・合計納税額の比較表です。グラフはアプリ画面でも確認できます。"))
+    story.append(_build_pdf_table(sim_trim, body_style, header_style))
+    story.append(PageBreak())
+
+    story.extend(section("7. 小規模宅地等・再判定論点", "小規模宅地等は本体判定ではなく再判定レビューとして整理しています。危険論点を隠さず一覧化します。"))
+    story.append(_build_pdf_table(df_small_scale_review, body_style, header_style))
+    story.append(Spacer(1, 4 * mm))
+    story.append(_build_pdf_table(df_audit_notes, body_style, header_style))
+    story.append(PageBreak())
+
+    conclusion_df = pd.DataFrame([
+        {"項目": "現時点の比較結論", "内容": "一次→二次接続と税額調整の骨格は再建済み。危険論点は要確認のまま明示。"},
+        {"項目": "要確認論点", "内容": "小規模宅地等本体、相次相続控除の更なる厳密化、提出前レビュー"},
+        {"項目": "次アクション", "内容": "社内レビュー実施後、必要に応じてPPT化・提出用調整へ進む"},
+    ])
+    story.extend(section("8. 結論整理", "現時点の資料は内部確認用の標準PDFであり、顧客提出前には税務・表示・数値の再レビューが必要です。"))
+    story.append(_build_pdf_table(conclusion_df, body_style, header_style, [50*mm, 120*mm]))
+    story.append(PageBreak())
+
+    story.extend(section("9. 免責・注意事項", None))
+    story.append(_build_pdf_note_box(
+        "本資料は内部確認用の概算資料です。顧客提出・申告判断・正式提案の前に、税務論点・主数字・表示内容を必ず個別確認してください。<br/>"
+        "二次相続、小規模宅地等、相次相続控除等には未実装または精緻化途上の論点を含みます。",
+        body_style,
+    ))
+
+    doc.build(story)
+    output.seek(0)
+    return output.getvalue()
+
+
+def create_excel_file(df1: pd.DataFrame, df_heirs: pd.DataFrame, df_small: pd.DataFrame, df_gifts: pd.DataFrame, df2: pd.DataFrame, df_sim: pd.DataFrame, df_snapshot_summary: pd.DataFrame, df_carryforward: pd.DataFrame, df_audit_notes: pd.DataFrame, df_small_scale_review: pd.DataFrame, df_successive_credit: pd.DataFrame) -> bytes:
+    output = BytesIO()
+    sheet_map = {
+        "一次相続（概算）": df1,
+        "各人別税額（概算）": df_heirs,
+        "小宅判定（要確認）": df_small,
+        "贈与台帳（内部確認）": df_gifts,
+        "二次相続（参考）": df2,
+        "比較表（内部確認）": df_sim,
+        "接続サマリー（内部確認）": df_snapshot_summary,
+        "carry_forward（内部確認）": df_carryforward,
+        "監査メモ（内部確認）": df_audit_notes,
+        "小宅再判定（内部確認）": df_small_scale_review,
+        "相次控除明細（内部確認）": df_successive_credit,
+    }
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df1.to_excel(writer, sheet_name="一次相続", index=False)
-        df_heirs.to_excel(writer, sheet_name="各人別税額", index=False)
-        df_small.to_excel(writer, sheet_name="小宅判定", index=False)
-        df_gifts.to_excel(writer, sheet_name="贈与台帳", index=False)
-        df2.to_excel(writer, sheet_name="二次相続", index=False)
-        df_sim.to_excel(writer, sheet_name="シミュレーション", index=False)
+        for sheet_name, df in sheet_map.items():
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
 
     output.seek(0)
     wb = load_workbook(output)
@@ -1226,7 +2408,12 @@ def create_excel_file(df1: pd.DataFrame, df_heirs: pd.DataFrame, df_small: pd.Da
     header_fill = PatternFill(start_color=COLOR_NAVY, end_color=COLOR_NAVY, fill_type="solid")
     header_font = Font(color="FFFFFF", bold=True)
     title_font = Font(size=14, bold=True)
-    center_align = Alignment(horizontal="center", vertical="center")
+    subtitle_font = Font(size=10, italic=True, color="666666")
+    notice_fill = PatternFill(start_color="FFF4CC", end_color="FFF4CC", fill_type="solid")
+    notice_font = Font(color="7A5C00", bold=True)
+    section_fill = PatternFill(start_color="E9EEF7", end_color="E9EEF7", fill_type="solid")
+    center_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    left_align = Alignment(horizontal="left", vertical="center", wrap_text=True)
     thin_border = Border(
         left=Side(style="thin"),
         right=Side(style="thin"),
@@ -1236,28 +2423,65 @@ def create_excel_file(df1: pd.DataFrame, df_heirs: pd.DataFrame, df_small: pd.Da
 
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
-        ws.insert_rows(1)
+        max_col = max(1, ws.max_column)
+        ws.insert_rows(1, amount=4)
+        end_col_letter = ws.cell(row=1, column=max_col).column_letter
+
+        ws.merge_cells(f"A1:{end_col_letter}1")
         ws["A1"] = EXCEL_TITLE
         ws["A1"].font = title_font
+        ws["A1"].alignment = left_align
 
-        for cell in ws[2]:
+        ws.merge_cells(f"A2:{end_col_letter}2")
+        ws["A2"] = f"シート名: {sheet_name}"
+        ws["A2"].font = subtitle_font
+        ws["A2"].alignment = left_align
+
+        ws.merge_cells(f"A3:{end_col_letter}3")
+        ws["A3"] = OUTPUT_RISK_NOTICE
+        ws["A3"].fill = notice_fill
+        ws["A3"].font = notice_font
+        ws["A3"].alignment = left_align
+        ws.row_dimensions[3].height = 36
+
+        ws.merge_cells(f"A4:{end_col_letter}4")
+        ws["A4"] = "用途: 内部確認・比較検討用。顧客提出前に税務論点・主数字・注記のレビューを必ず実施してください。"
+        ws["A4"].fill = section_fill
+        ws["A4"].alignment = left_align
+        ws.row_dimensions[4].height = 30
+
+        header_row = 5
+        for cell in ws[header_row]:
             cell.fill = header_fill
             cell.font = header_font
             cell.alignment = center_align
+            cell.border = thin_border
 
-        for row in ws.iter_rows(min_row=2):
+        for row in ws.iter_rows(min_row=header_row + 1):
             for cell in row:
                 cell.border = thin_border
                 if isinstance(cell.value, Number):
                     cell.number_format = "#,##0"
+                    cell.alignment = center_align
+                else:
+                    cell.alignment = left_align
 
-        for col in ws.columns:
+        ws.freeze_panes = "A6"
+        ws.auto_filter.ref = f"A{header_row}:{end_col_letter}{max(header_row, ws.max_row)}"
+
+        for col_idx in range(1, max_col + 1):
             max_length = 0
-            col_letter = col[0].column_letter
-            for cell in col:
-                if cell.value is not None:
-                    max_length = max(max_length, len(str(cell.value)))
-            ws.column_dimensions[col_letter].width = max_length + 2
+            col_letter = ws.cell(row=header_row, column=col_idx).column_letter
+            for row_idx in range(1, ws.max_row + 1):
+                value = ws.cell(row=row_idx, column=col_idx).value
+                if value is not None:
+                    max_length = max(max_length, len(str(value)))
+            adjusted_width = min(max(max_length + 2, 12), 32)
+            ws.column_dimensions[col_letter].width = adjusted_width
+
+        if max_col >= 1:
+            ws.column_dimensions["A"].width = max(ws.column_dimensions["A"].width, 18)
+        ws.sheet_view.showGridLines = True
 
     final_output = BytesIO()
     wb.save(final_output)
@@ -1265,11 +2489,49 @@ def create_excel_file(df1: pd.DataFrame, df_heirs: pd.DataFrame, df_small: pd.Da
 
 
 def build_simulation_figure(df_sim: pd.DataFrame) -> go.Figure:
+    plot_df = df_sim.copy()
+    plot_df["配分数値"] = plot_df["配分(%)"].astype(str).str.replace("%", "", regex=False).astype(int)
+    plot_df = plot_df.sort_values("配分数値").reset_index(drop=True)
+
+    x_labels = plot_df["配分(%)"]
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=df_sim["配分(%)"], y=df_sim["一次相続税額"], name="一次相続税", marker_color=f"#{COLOR_NAVY}"))
-    fig.add_trace(go.Bar(x=df_sim["配分(%)"], y=df_sim["二次相続税額"], name="二次相続税", marker_color=f"#{COLOR_GOLD}"))
-    fig.add_trace(go.Scatter(x=df_sim["配分(%)"], y=df_sim["合計納税額"], name="合計", line=dict(color=f"#{COLOR_RED}", width=4)))
-    fig.update_layout(barmode="stack", title="税額最適化シミュレーション", xaxis_title="配偶者配分(%)", yaxis_title="税額(円)")
+    fig.add_trace(
+        go.Bar(
+            x=x_labels,
+            y=plot_df["一次相続税額"],
+            name="一次相続税（概算）",
+            marker_color=f"#{COLOR_NAVY}",
+            hovertemplate="配偶者取得割合: %{x}<br>一次相続税（概算）: %{y:,}円<extra></extra>",
+        )
+    )
+    fig.add_trace(
+        go.Bar(
+            x=x_labels,
+            y=plot_df["二次相続税額"],
+            name="二次相続税（概算）",
+            marker_color=f"#{COLOR_GOLD}",
+            hovertemplate="配偶者取得割合: %{x}<br>二次相続税（概算）: %{y:,}円<extra></extra>",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x_labels,
+            y=plot_df["合計納税額"],
+            name="合計納税額（概算）",
+            line=dict(color=f"#{COLOR_RED}", width=4),
+            hovertemplate="配偶者取得割合: %{x}<br>合計納税額（概算）: %{y:,}円<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        barmode="stack",
+        title="配偶者取得割合別 税額比較シミュレーション（内部確認用・概算）",
+        xaxis_title="横軸：配偶者取得割合（%）",
+        yaxis_title="縦軸：概算税額（円）",
+        legend_title="表示項目",
+        hovermode="x unified",
+    )
+    fig.update_xaxes(type="category", categoryorder="array", categoryarray=list(x_labels))
+    fig.update_yaxes(tickformat=",", rangemode="tozero")
     return fig
 
 
@@ -1278,8 +2540,9 @@ def render_audit_evidence() -> None:
         f"""
         <div style="background-color: #f9f9f9; border: 2px solid #{COLOR_GOLD}; padding: 20px; border-radius: 5px;">
             <p style="color: #{COLOR_NAVY}; font-weight: bold; margin-bottom: 10px;">🛡️ 山根会計 監査証跡エビデンス (v31.16)</p>
-            <p style="font-size: 0.9em; line-height: 1.6;">担当: 川東 / 本版は概算試算ロジックです。<br>
-            各人別課税価格・各人別税額・配偶者税額軽減の土台に加え、生命保険金非課税の受取人別管理、2割加算、小規模宅地等の要件判定付き概算ロジックを反映。さらに一次相続の実取得額を相続人ごとに入力できるUIを追加し、入力差額は内部で比率正規化する設計です。</p>
+            <p style="font-size: 0.9em; line-height: 1.6;">担当: 川東 / 本版は内部確認用の概算試算ロジックです。<br>
+            各人別課税価格・各人別税額・配偶者税額軽減の土台に加え、生命保険金非課税の受取人別管理、2割加算、小規模宅地等の要件判定付き概算ロジックを反映しています。<br>
+            二次相続・相次相続控除・小規模宅地等の個別論点は、実務利用前に別途確認が必要です。顧客提出前提の完成資料ではありません。提出前に別途レビューを実施してください。</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1294,24 +2557,57 @@ def render_sidebar() -> None:
     st.sidebar.info(APP_LOGIN_USER_LABEL)
 
 
+def render_risk_notice(message: str, level: str = "warning") -> None:
+    if level == "error":
+        st.error(message)
+    elif level == "info":
+        st.info(message)
+    else:
+        st.warning(message)
+
+
 def render_tab_basic() -> tuple[int, bool, list[dict[str, Any]]]:
     add_print_button("1. 基本構成")
-    st.subheader("相続関係の設定")
+    st.subheader("相続関係の設定（内部確認用）")
     c1, c2 = st.columns(2)
     heir_count = c1.number_input("相続人の人数（配偶者除く）", min_value=1, max_value=10, value=2, key="in_child")
     has_spouse = c2.checkbox("配偶者は健在", value=True, key="in_spouse")
     heirs_info: list[dict[str, Any]] = []
     for i in range(heir_count):
-        h_type = st.selectbox(f"相続人 {i + 1} の続柄", HEIR_TYPE_OPTIONS, key=f"rel_{i}")
+        st.write(f"##### 相続人 {i + 1}")
+        top_col1, top_col2 = st.columns(2)
+        h_type = top_col1.selectbox(f"相続人 {i + 1} の続柄", HEIR_TYPE_OPTIONS, key=f"rel_{i}")
         is_substitute = False
         if h_type == HEIR_TYPE_GRANDCHILD:
-            is_substitute = st.checkbox(f"相続人 {i + 1} は代襲相続人", value=False, key=f"substitute_{i}")
-        heirs_info.append({"type": h_type, "is_substitute": is_substitute})
+            is_substitute = top_col2.checkbox(f"相続人 {i + 1} は代襲相続人", value=False, key=f"substitute_{i}")
+        detail_col1, detail_col2, detail_col3 = st.columns(3)
+        has_birth_date = detail_col1.checkbox(f"相続人 {i + 1} の生年月日を入力する", value=False, key=f"birth_enabled_{i}")
+        birth_date = None
+        if has_birth_date:
+            birth_date = detail_col1.date_input(
+                f"相続人 {i + 1} の生年月日",
+                value=date(2000, 1, 1),
+                min_value=date(1900, 1, 1),
+                max_value=date.today(),
+                key=f"birth_date_{i}",
+            )
+        is_disabled = detail_col2.checkbox(f"相続人 {i + 1} は障害者", value=False, key=f"disabled_{i}")
+        is_special_disabled = False
+        if is_disabled:
+            is_special_disabled = detail_col3.checkbox(f"相続人 {i + 1} は特別障害者", value=False, key=f"special_disabled_{i}")
+        heirs_info.append({
+            "type": h_type,
+            "is_substitute": is_substitute,
+            "birth_date": birth_date,
+            "is_disabled": is_disabled,
+            "is_special_disabled": is_special_disabled,
+        })
     return heir_count, has_spouse, heirs_info
 
 
 def render_small_scale_input_section(category: str, title: str, has_spouse: bool, heirs_info: list[dict[str, Any]]) -> SmallScaleInput:
     st.write(f"##### {title}：小規模宅地等の特例判定")
+    st.caption(SMALL_SCALE_RISK_NOTICE)
     options = build_heir_labels(has_spouse, heirs_info)
     option_labels = [label for label, _ in options] if options else ["未設定"]
     apply_special_rule = st.checkbox(f"{title}で小宅特例を検討する", value=(category == LAND_CATEGORY_HOME), key=f"apply_small_{category}")
@@ -1338,7 +2634,8 @@ def render_small_scale_input_section(category: str, title: str, has_spouse: bool
 
 def render_tab_primary_inputs(heir_count: int, has_spouse: bool, heirs_info: list[dict[str, Any]]) -> PrimaryInputs:
     add_print_button("2. 一次財産詳細")
-    st.subheader("一次相続：財産・贈与入力")
+    st.subheader("一次相続：財産・贈与入力（内部確認用）")
+    render_risk_notice(INSURANCE_GIFT_RISK_NOTICE, level="info")
     col_a, col_b, col_c = st.columns(3)
     with col_a:
         st.write("#### 🏗️ 不動産")
@@ -1437,26 +2734,42 @@ def render_tab_primary_inputs(heir_count: int, has_spouse: bool, heirs_info: lis
 
 def render_tab_primary_detail(df1: pd.DataFrame, df_heirs: pd.DataFrame, df_small: pd.DataFrame, df_gifts: pd.DataFrame) -> None:
     add_print_button("3. 一次相続明細")
-    st.subheader("一次相続：計算明細")
+    st.subheader("一次相続：計算明細（概算・内部確認用）")
     st.table(df1)
     st.divider()
-    st.subheader("小規模宅地等の特例 判定結果")
+    st.subheader("小規模宅地等の特例 判定結果（概算・要確認）")
     st.dataframe(df_small, use_container_width=True)
     st.divider()
-    st.subheader("贈与加算・相続時精算課税 明細")
+    st.subheader("贈与加算・相続時精算課税 明細（概算・要確認）")
     if df_gifts.empty:
         st.caption("贈与明細はありません。")
     else:
         st.dataframe(df_gifts, use_container_width=True)
     st.divider()
-    st.subheader("各人別課税価格・各人別税額（概算）")
+    st.subheader("各人別課税価格・各人別税額（概算・要個別確認）")
     st.dataframe(df_heirs, use_container_width=True)
 
 
-def render_tab_secondary_detail(df2: pd.DataFrame) -> None:
+def render_tab_secondary_detail(df2: pd.DataFrame, df_snapshot_summary: pd.DataFrame, df_carryforward: pd.DataFrame, df_audit_notes: pd.DataFrame, df_small_scale_review: pd.DataFrame, df_successive_credit: pd.DataFrame) -> None:
     add_print_button("4. 二次相続明細")
-    st.subheader("二次相続：計算明細予測")
+    st.subheader("二次相続：計算明細予測（概算参考・要確認）")
+    render_risk_notice(SECONDARY_RISK_NOTICE)
     st.table(df2)
+    st.divider()
+    st.subheader("一次→二次 接続サマリー（内部確認用）")
+    st.dataframe(df_snapshot_summary, use_container_width=True)
+    st.divider()
+    st.subheader("各人別 carry forward 一覧（内部確認用）")
+    st.dataframe(df_carryforward, use_container_width=True)
+    st.divider()
+    st.subheader("監査メモ・再判定事項（内部確認用）")
+    st.dataframe(df_audit_notes, use_container_width=True)
+    st.divider()
+    st.subheader("相次相続控除 明細（内部確認用）")
+    st.dataframe(df_successive_credit, use_container_width=True)
+    st.divider()
+    st.subheader("小規模宅地等 再判定レビュー（内部確認用）")
+    st.dataframe(df_small_scale_review, use_container_width=True)
 
 
 def estimate_total_taxable_price_reference(primary_inputs: PrimaryInputs) -> Decimal:
@@ -1504,7 +2817,8 @@ def build_simulation_allocation_inputs(
 
 def render_tab_secondary_parameters(has_spouse: bool, heirs_info: list[dict[str, Any]], estimated_tax_p: Decimal) -> SecondaryInputs:
     add_print_button("5. 二次推移予測")
-    st.subheader("二次推移パラメータ設定")
+    st.subheader("二次推移パラメータ設定（参考試算用）")
+    render_risk_notice(SECONDARY_RISK_NOTICE)
     cp1, cp2 = st.columns(2)
     spouse_acquisition_pct = 0
     if has_spouse:
@@ -1549,9 +2863,10 @@ def render_tab_secondary_parameters(has_spouse: bool, heirs_info: list[dict[str,
     )
 
 
-def render_tab_analysis(df_sim: pd.DataFrame, iryu_df: pd.DataFrame, df1: pd.DataFrame, df_heirs: pd.DataFrame, df_small: pd.DataFrame, df_gifts: pd.DataFrame, df2: pd.DataFrame) -> None:
+def render_tab_analysis(primary_inputs: PrimaryInputs, primary_result: PrimaryResult, secondary_inputs: SecondaryInputs, secondary_result: SecondaryResult, df_sim: pd.DataFrame, iryu_df: pd.DataFrame, df1: pd.DataFrame, df_heirs: pd.DataFrame, df_small: pd.DataFrame, df_gifts: pd.DataFrame, df2: pd.DataFrame, df_snapshot_summary: pd.DataFrame, df_carryforward: pd.DataFrame, df_audit_notes: pd.DataFrame, df_small_scale_review: pd.DataFrame, df_successive_credit: pd.DataFrame) -> None:
     add_print_button("6. 精密分析結果")
-    st.subheader("配偶者取得割合別の税額推移分析")
+    st.subheader("配偶者取得割合別の税額推移分析（内部確認用・概算・横軸=配偶者取得割合 / 縦軸=税額）")
+    render_risk_notice("配偶者取得割合別の比較は内部検討用の参考表示です。差額の背景にある個別論点確認前に断定利用しないでください。", level="info")
     st.plotly_chart(build_simulation_figure(df_sim), use_container_width=True)
     st.dataframe(
         df_sim.style.format({"一次相続税額": "{:,}", "二次相続税額": "{:,}", "合計納税額": "{:,}"}),
@@ -1559,24 +2874,54 @@ def render_tab_analysis(df_sim: pd.DataFrame, iryu_df: pd.DataFrame, df1: pd.Dat
     )
 
     st.divider()
-    st.subheader("⚠️ 遺留分侵害額の参考表示")
+    st.subheader("⚠️ 遺留分侵害額の参考表示（内部確認用）")
     st.table(iryu_df)
 
     st.divider()
     render_audit_evidence()
 
     st.divider()
-    st.subheader("📥 Excel出力")
+    st.subheader("📥 成果物出力（内部確認用・提出前確認必須）")
+    render_risk_notice(OUTPUT_RISK_NOTICE)
+    col_excel, col_pdf, col_ppt = st.columns(3)
     try:
-        excel_data = create_excel_file(df1, df_heirs, df_small, df_gifts, df2, df_sim)
-        st.download_button(
-            label="📊 Excelファイルをダウンロード",
-            data=excel_data,
-            file_name=EXCEL_FILE_NAME,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+        excel_data = create_excel_file(df1, df_heirs, df_small, df_gifts, df2, df_sim, df_snapshot_summary, df_carryforward, df_audit_notes, df_small_scale_review, df_successive_credit)
+        with col_excel:
+            st.download_button(
+                label="📊 Excelファイルをダウンロード（内部確認用）",
+                data=excel_data,
+                file_name=EXCEL_FILE_NAME,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
     except Exception as exc:
-        st.error(f"Excel出力エラー: {exc}")
+        with col_excel:
+            st.error(f"Excel出力エラー: {exc}")
+
+    try:
+        pdf_data = create_pdf_report(primary_inputs, primary_result, secondary_inputs, secondary_result, df_sim, df_snapshot_summary, df_carryforward, df_audit_notes, df_small_scale_review, df_successive_credit)
+        with col_pdf:
+            st.download_button(
+                label="📄 PDFファイルをダウンロード（内部確認用）",
+                data=pdf_data,
+                file_name=PDF_FILE_NAME,
+                mime="application/pdf",
+            )
+    except Exception as exc:
+        with col_pdf:
+            st.error(f"PDF出力エラー: {exc}")
+
+    try:
+        ppt_data = create_ppt_report(primary_inputs, primary_result, secondary_inputs, secondary_result, df_sim, df_snapshot_summary, df_carryforward, df_audit_notes, df_small_scale_review, df_successive_credit)
+        with col_ppt:
+            st.download_button(
+                label="🖥️ PPTファイルをダウンロード（内部確認用）",
+                data=ppt_data,
+                file_name=PPT_FILE_NAME,
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            )
+    except Exception as exc:
+        with col_ppt:
+            st.error(f"PPT出力エラー: {exc}")
 
 
 # =========================================================
@@ -1588,6 +2933,7 @@ def main() -> None:
         return
 
     render_sidebar()
+    render_risk_notice(GLOBAL_RISK_NOTICE)
     tabs = st.tabs(TAB_LABELS)
 
     with tabs[0]:
@@ -1608,6 +2954,11 @@ def main() -> None:
     df_small = build_small_scale_detail_df(primary_result)
     df_gifts = build_gift_detail_df(primary_result)
     df2 = build_secondary_detail_df(secondary_result)
+    df_snapshot_summary = build_snapshot_summary_df(secondary_result.snapshot, secondary_result.context, secondary_result)
+    df_carryforward = build_heir_carryforward_df(secondary_result.snapshot)
+    df_audit_notes = build_secondary_audit_notes_df(secondary_result.snapshot, secondary_result.context, secondary_result)
+    df_small_scale_review = build_secondary_small_scale_review_df(secondary_result)
+    df_successive_credit = build_successive_inheritance_credit_df(secondary_result)
     df_sim = build_simulation_df(primary_inputs, primary_result, secondary_inputs)
     iryu_df = build_iryubun_reference(primary_inputs, primary_result)
 
@@ -1615,10 +2966,10 @@ def main() -> None:
         render_tab_primary_detail(df1, df_heirs, df_small, df_gifts)
 
     with tabs[3]:
-        render_tab_secondary_detail(df2)
+        render_tab_secondary_detail(df2, df_snapshot_summary, df_carryforward, df_audit_notes, df_small_scale_review, df_successive_credit)
 
     with tabs[5]:
-        render_tab_analysis(df_sim, iryu_df, df1, df_heirs, df_small, df_gifts, df2)
+        render_tab_analysis(primary_inputs, primary_result, secondary_inputs, secondary_result, df_sim, iryu_df, df1, df_heirs, df_small, df_gifts, df2, df_snapshot_summary, df_carryforward, df_audit_notes, df_small_scale_review, df_successive_credit)
 
 
 if __name__ == "__main__":
