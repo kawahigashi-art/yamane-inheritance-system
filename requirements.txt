@@ -1,6 +1,6 @@
 streamlit
 pandas
-plotly
-openpyxl
-reportlab
-python-pptx
+pymupdf
+pdfplumber
+pillow
+pytesseract
