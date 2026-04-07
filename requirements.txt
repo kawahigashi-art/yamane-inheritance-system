@@ -5,3 +5,4 @@ pdfplumber
 pillow
 pytesseract
 plotly
+openpyxl
