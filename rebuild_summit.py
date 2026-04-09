@@ -2383,9 +2383,281 @@ def create_pdf_report(
     return output.getvalue()
 
 
+
+
+# =========================================================
+# PPT Output Logic
+# =========================================================
+def _ppt_safe(value: Any) -> str:
+    if value is None:
+        return "―"
+    text = str(value).strip()
+    return text if text else "―"
+
+
+def _ppt_money(value: Any) -> str:
+    if value is None:
+        return "―"
+    if isinstance(value, Decimal):
+        return f"{int(value):,}円"
+    if isinstance(value, Number):
+        return f"{int(value):,}円"
+    try:
+        return f"{int(value):,}円"
+    except Exception:
+        return _ppt_safe(value)
+
+
+def _ppt_add_textbox(slide, text: str, left: float, top: float, width: float, height: float, font_size: int = 14, bold: bool = False, color: str = COLOR_NAVY):
+    from pptx.dml.color import RGBColor
+    box = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
+    tf = box.text_frame
+    tf.clear()
+    p = tf.paragraphs[0]
+    p.text = text
+    p.font.size = Pt(font_size)
+    p.font.bold = bold
+    p.font.color.rgb = RGBColor.from_string(color.upper())
+    return box
+
+
+def _ppt_add_note(slide, text: str, left: float, top: float, width: float, height: float):
+    from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE
+    from pptx.dml.color import RGBColor
+    shape = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, Inches(left), Inches(top), Inches(width), Inches(height))
+    shape.fill.solid()
+    shape.fill.fore_color.rgb = RGBColor.from_string('FFF4CC')
+    shape.line.color.rgb = RGBColor.from_string(COLOR_GOLD.upper())
+    tf = shape.text_frame
+    tf.clear()
+    p = tf.paragraphs[0]
+    p.text = text
+    p.font.size = Pt(11)
+    p.font.color.rgb = RGBColor.from_string('7A5C00')
+    return shape
+
+
+def _ppt_add_table(slide, headers: list[str], rows: list[list[Any]], left: float, top: float, width: float, height: float, font_size: int = 10):
+    from pptx.dml.color import RGBColor
+    table = slide.shapes.add_table(len(rows) + 1, len(headers), Inches(left), Inches(top), Inches(width), Inches(height)).table
+    for c, header in enumerate(headers):
+        cell = table.cell(0, c)
+        cell.text = str(header)
+        cell.fill.solid()
+        cell.fill.fore_color.rgb = RGBColor.from_string(COLOR_NAVY.upper())
+        for p in cell.text_frame.paragraphs:
+            p.font.size = Pt(font_size)
+            p.font.bold = True
+            p.font.color.rgb = RGBColor.from_string('FFFFFF')
+    for r, row in enumerate(rows, start=1):
+        for c, val in enumerate(row):
+            table.cell(r, c).text = _ppt_safe(val)
+            for p in table.cell(r, c).text_frame.paragraphs:
+                p.font.size = Pt(font_size)
+    return table
+
+
+def _ppt_pick_rows(df_sim: pd.DataFrame) -> pd.DataFrame:
+    if df_sim is None or df_sim.empty:
+        return pd.DataFrame(columns=['配分(%)', '一次相続税額', '二次相続税額', '合計納税額'])
+    work = df_sim.copy()
+    for col in ['一次相続税額', '二次相続税額', '合計納税額']:
+        work[col] = pd.to_numeric(work[col], errors='coerce').fillna(0)
+    idx_min = work['合計納税額'].idxmin()
+    selected = sorted(set([0, len(work)//2, len(work)-1, idx_min]))
+    return work.iloc[selected][['配分(%)', '一次相続税額', '二次相続税額', '合計納税額']].copy()
+
+
+def create_ppt_report(
+    primary_inputs: PrimaryInputs,
+    primary_result: PrimaryResult,
+    secondary_inputs: SecondaryInputs,
+    secondary_result: SecondaryResult,
+    df_sim: pd.DataFrame,
+    df_snapshot_summary: pd.DataFrame,
+    df_carryforward: pd.DataFrame,
+    df_audit_notes: pd.DataFrame,
+    df_small_scale_review: pd.DataFrame,
+    df_successive_credit: pd.DataFrame,
+) -> bytes:
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+
+    # Slide 1: cover
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _ppt_add_textbox(slide, '二次相続シミュレーション分析資料', 0.55, 0.35, 11.8, 0.6, 24, True)
+    _ppt_add_textbox(slide, '一次相続から二次相続までの税負担比較', 0.65, 0.95, 9.0, 0.4, 14, False, '666666')
+    _ppt_add_note(slide, '内部確認用 / 概算を含む資料 / 提出前レビュー必須', 0.7, 1.45, 6.4, 0.8)
+    _ppt_add_textbox(slide, '山根会計', 0.8, 2.6, 3.0, 0.4, 18, True)
+    _ppt_add_textbox(slide, f'作成日: {date.today().isoformat()}', 0.8, 3.1, 3.5, 0.3, 12)
+
+    # Slide 2: assumptions
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _ppt_add_textbox(slide, '本件の前提条件', 0.55, 0.3, 11.8, 0.5, 22, True)
+    heir_lines = [f"法定相続人数: {primary_result.st_count}人", f"配偶者: {'あり' if primary_inputs.has_spouse else 'なし'}"]
+    heir_lines.extend([f"相続人{i+1}: {h['type']}" for i, h in enumerate(primary_inputs.heirs_info[:4])])
+    _ppt_add_textbox(slide, '\n'.join(heir_lines), 0.7, 1.1, 4.3, 2.5, 15)
+    rows = [
+        ['総財産額(概算)', _ppt_money(primary_result.pure_as)],
+        ['債務', _ppt_money(primary_inputs.v_debt)],
+        ['葬式費用', _ppt_money(primary_inputs.v_funeral)],
+        ['生命保険', _ppt_money(primary_inputs.v_ins)],
+        ['固有財産', _ppt_money(secondary_inputs.s_own)],
+        ['二次までの年数', f'{secondary_inputs.interval_years}年'],
+        ['年間生活費', _ppt_money(secondary_inputs.annual_spend)],
+    ]
+    _ppt_add_table(slide, ['項目', '内容'], rows, 5.2, 1.1, 7.2, 3.4, 11)
+    _ppt_add_note(slide, '入力不足がある場合、結果は参考値として扱います。', 0.7, 5.2, 5.0, 0.7)
+
+    # Slide 3: primary
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _ppt_add_textbox(slide, '一次相続の概要', 0.55, 0.3, 11.8, 0.5, 22, True)
+    _ppt_add_note(slide, f"一次相続税額: {_ppt_money(primary_result.total_final_tax)}", 0.7, 1.1, 3.0, 0.9)
+    _ppt_add_note(slide, f"配偶者取得額: {_ppt_money(primary_result.spouse_actual_taxable_price)}", 4.0, 1.1, 3.0, 0.9)
+    _ppt_add_note(slide, f"一次相続後純資産: {_ppt_money(primary_result.pure_as)}", 7.3, 1.1, 3.0, 0.9)
+    rows = [
+        ['課税価格', _ppt_money(primary_result.tax_p)],
+        ['基礎控除', _ppt_money(primary_result.basic_1)],
+        ['課税遺産総額', _ppt_money(primary_result.taxable_1)],
+    ]
+    _ppt_add_table(slide, ['項目', '内容'], rows, 0.8, 2.5, 5.0, 1.8, 11)
+    _ppt_add_note(slide, '配偶者軽減・生命保険非課税・贈与加算等の影響を含む概算整理です。', 6.1, 2.5, 5.7, 1.0)
+
+    # Slide 4: secondary
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _ppt_add_textbox(slide, '二次相続の概要', 0.55, 0.3, 11.8, 0.5, 22, True)
+    bd = secondary_result.starting_estate_breakdown
+    lines = ['二次起点財産情報なし'] if bd is None else [
+        f'配偶者税引後残余: {_ppt_money(bd.spouse_net_assets_after_first_tax)}',
+        f'固有財産: {_ppt_money(bd.spouse_separate_property_amount)}',
+        f'生活費調整: -{_ppt_money(bd.living_cost_adjustment_amount)}',
+        f'資産変動調整: {_ppt_money(bd.asset_change_adjustment_amount)}',
+        f'二次開始財産: {_ppt_money(bd.final_secondary_starting_estate)}',
+    ]
+    _ppt_add_textbox(slide, '\n'.join(lines), 0.75, 1.1, 5.8, 3.0, 15)
+    _ppt_add_note(slide, f"調整前二次税額: {_ppt_money(secondary_result.preliminary_total_tax_2)}", 7.0, 1.2, 2.4, 0.9)
+    _ppt_add_note(slide, f"調整後二次税額: {_ppt_money(secondary_result.total_tax_2)}", 9.7, 1.2, 2.4, 0.9)
+
+    # Slide 5: connection
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _ppt_add_textbox(slide, '一次→二次のつながり', 0.55, 0.3, 11.8, 0.5, 22, True)
+    left_lines = []
+    if df_snapshot_summary is not None and not df_snapshot_summary.empty:
+        for _, row in df_snapshot_summary.head(6).iterrows():
+            if len(row) >= 2:
+                left_lines.append(f"{row.iloc[0]}: {row.iloc[1]}")
+    if not left_lines:
+        left_lines = ['接続サマリー情報なし']
+    _ppt_add_textbox(slide, '\n'.join(left_lines), 0.75, 1.1, 6.0, 3.7, 14)
+    cf_rows = []
+    use_cols = [c for c in ['相続人', '続柄', '取得総額', '税引後残高'] if df_carryforward is not None and c in df_carryforward.columns]
+    if use_cols:
+        for _, row in df_carryforward.head(5)[use_cols].iterrows():
+            cf_rows.append([row.get(c, '―') for c in use_cols])
+    _ppt_add_table(slide, use_cols if use_cols else ['項目'], cf_rows if cf_rows else [['carry forward 情報なし']], 6.9, 1.1, 5.1, 3.8, 10)
+
+    # Slide 6: comparison table
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _ppt_add_textbox(slide, '配偶者取得割合別 税額比較', 0.55, 0.3, 11.8, 0.5, 22, True)
+    picked = _ppt_pick_rows(df_sim)
+    rows = []
+    min_ratio = '―'
+    diff_text = '―'
+    if not picked.empty:
+        min_row = picked.loc[picked['合計納税額'].idxmin()]
+        min_ratio = str(min_row['配分(%)'])
+        diff_text = f"{int(picked['合計納税額'].max() - picked['合計納税額'].min()):,}円"
+        for _, row in picked.iterrows():
+            rows.append([row['配分(%)'], f"{int(row['一次相続税額']):,}", f"{int(row['二次相続税額']):,}", f"{int(row['合計納税額']):,}"])
+    _ppt_add_note(slide, f'最小税額帯: {min_ratio} / 最大差額: {diff_text}', 0.8, 1.1, 5.6, 0.8)
+    _ppt_add_table(slide, ['配分(%)', '一次税', '二次税', '合計税額'], rows if rows else [['―','―','―','―']], 0.8, 2.1, 11.0, 2.8, 11)
+
+    # Slide 7: comparison chart substitute
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _ppt_add_textbox(slide, '配偶者取得割合別 グラフ比較', 0.55, 0.3, 11.8, 0.5, 22, True)
+    graph_lines = ['横軸: 配偶者取得割合(%)', '縦軸: 税額(円)']
+    if df_sim is not None and not df_sim.empty:
+        work = df_sim.copy()
+        for col in ['一次相続税額', '二次相続税額', '合計納税額']:
+            work[col] = pd.to_numeric(work[col], errors='coerce').fillna(0)
+        idx = work['合計納税額'].idxmin()
+        graph_lines.append(f"最小税額帯: {work.loc[idx, '配分(%)']}")
+        graph_lines.append(f"最小合計税額: {int(work.loc[idx, '合計納税額']):,}円")
+    _ppt_add_textbox(slide, '\n'.join(graph_lines), 0.8, 1.2, 4.5, 2.5, 15)
+    _ppt_add_note(slide, '実画面では Plotly グラフを確認してください。本スライドは説明用の要約です。', 0.8, 4.9, 5.1, 0.8)
+    rows = []
+    if df_sim is not None and not df_sim.empty:
+        for _, row in _ppt_pick_rows(df_sim).iterrows():
+            rows.append([row['配分(%)'], f"{int(row['一次相続税額']):,}", f"{int(row['二次相続税額']):,}", f"{int(row['合計納税額']):,}"])
+    _ppt_add_table(slide, ['配分', '一次税', '二次税', '合計'], rows if rows else [['―','―','―','―']], 5.4, 1.2, 6.2, 3.6, 10)
+
+    # Slide 8: review
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _ppt_add_textbox(slide, '小規模宅地等・要確認論点', 0.55, 0.3, 11.8, 0.5, 22, True)
+    left_rows = []
+    review_cols = [c for c in ['対象宅地', '状態', '再判定アクション'] if df_small_scale_review is not None and c in df_small_scale_review.columns]
+    if review_cols:
+        for _, row in df_small_scale_review.head(5)[review_cols].iterrows():
+            left_rows.append([row.get(c, '―') for c in review_cols])
+    _ppt_add_table(slide, review_cols if review_cols else ['項目'], left_rows if left_rows else [['小宅再判定レビューなし']], 0.7, 1.15, 5.5, 3.9, 10)
+    note_lines = []
+    if df_audit_notes is not None and not df_audit_notes.empty:
+        for _, row in df_audit_notes.head(6).iterrows():
+            note_lines.append(f"{row.iloc[0]}: {row.iloc[1]}")
+    _ppt_add_textbox(slide, '\n'.join(note_lines) if note_lines else '監査メモなし', 6.6, 1.2, 5.2, 4.0, 12)
+
+    # Slide 9: conclusion
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _ppt_add_textbox(slide, '結論整理', 0.55, 0.3, 11.8, 0.5, 22, True)
+    conclusion_lines = []
+    if df_sim is not None and not df_sim.empty:
+        work = df_sim.copy()
+        work['合計納税額'] = pd.to_numeric(work['合計納税額'], errors='coerce').fillna(0)
+        idx = work['合計納税額'].idxmin()
+        conclusion_lines.extend([f"有力配分帯: {work.loc[idx, '配分(%)']}", f"最小合計税額: {int(work.loc[idx, '合計納税額']):,}円"])
+    else:
+        conclusion_lines.append('比較結果データなし')
+    _ppt_add_textbox(slide, '\n'.join(conclusion_lines), 0.8, 1.2, 5.0, 1.8, 16, True)
+    review_points = []
+    if df_audit_notes is not None and not df_audit_notes.empty:
+        for _, row in df_audit_notes.head(4).iterrows():
+            review_points.append(f"要確認: {row.iloc[0]}")
+    _ppt_add_textbox(slide, '\n'.join(review_points) if review_points else '要確認: 提出前レビュー', 0.8, 3.1, 5.3, 2.2, 14)
+    _ppt_add_note(slide, '結論は内部確認用の比較整理です。顧客説明前に数値・論点・表示を再レビューしてください。', 6.4, 1.5, 5.1, 1.3)
+
+    # Slide 10: disclaimer
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _ppt_add_textbox(slide, '免責・注意事項', 0.55, 0.3, 11.8, 0.5, 22, True)
+    disclaimer_lines = [
+        '本資料は内部確認用です。',
+        '概算を含み、税務判断・申告判断には個別確認が必要です。',
+        '小規模宅地等・相次相続控除等には未精緻化または再確認論点があります。',
+        '顧客提出前に数値・表示・論点レビューを必ず実施してください。',
+    ]
+    top = 1.2
+    for line in disclaimer_lines:
+        _ppt_add_note(slide, line, 0.8, top, 10.8, 0.8)
+        top += 1.0
+
+    output = BytesIO()
+    prs.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+
 def create_excel_file(df1: pd.DataFrame, df_heirs: pd.DataFrame, df_small: pd.DataFrame, df_gifts: pd.DataFrame, df2: pd.DataFrame, df_sim: pd.DataFrame, df_snapshot_summary: pd.DataFrame, df_carryforward: pd.DataFrame, df_audit_notes: pd.DataFrame, df_small_scale_review: pd.DataFrame, df_successive_credit: pd.DataFrame) -> bytes:
     output = BytesIO()
+    summary_rows = [
+        {"項目": "一次相続税額", "内容": fmt_int(primary_result.total_final_tax) + "円" if False else "コード連動要確認"},
+    ]
+    explanation_summary = pd.DataFrame([
+        {"項目": "資料位置づけ", "内容": "内部確認用・比較検討用"},
+        {"項目": "重点確認", "内容": "一次→二次接続、最小税額帯、要確認論点"},
+        {"項目": "出力利用", "内容": "顧客提出前にレビュー必須"},
+    ])
     sheet_map = {
+        "説明サマリー（内部確認）": explanation_summary,
         "一次相続（概算）": df1,
         "各人別税額（概算）": df_heirs,
         "小宅判定（要確認）": df_small,
