@@ -4,7 +4,3 @@ pymupdf
 pdfplumber
 pillow
 pytesseract
-plotly
-openpyxl
-reportlab
-python-pptx
