@@ -1,5 +1,8 @@
 streamlit
 pandas
+plotly
+openpyxl
+reportlab
 pymupdf
 pdfplumber
 pillow
