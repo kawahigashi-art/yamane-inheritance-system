@@ -1,3 +1,4 @@
+# 顧客提案資料向けに名称・文言を改善した版
 from __future__ import annotations
 
 # =========================================================
@@ -33,7 +34,10 @@ import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
 from openpyxl import load_workbook
+from openpyxl.chart import BarChart, LineChart, Reference
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.page import PageMargins
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -49,18 +53,18 @@ st.set_page_config(page_title="SUMMIT v31.16 PRO", layout="wide")
 # =========================================================
 # 1. Constants
 # =========================================================
-APP_TITLE = "山根会計 専売システム"
+APP_TITLE = "山根会計 相続シミュレーション"
 APP_LOGIN_USER_LABEL = "ログイン: 川東"
 APP_PASSWORD_ENV_KEY = "SUMMIT_APP_PASSWORD"
-EXCEL_FILE_NAME = "相続シミュレーション_内部確認用.xlsx"
-EXCEL_TITLE = "山根会計 相続税シミュレーション資料（内部確認用・概算）"
-PDF_FILE_NAME = "相続シミュレーション_内部確認用.pdf"
-PPT_FILE_NAME = "相続シミュレーション_内部確認用.pptx"
-GLOBAL_RISK_NOTICE = "本システムの表示・帳票・グラフは内部確認用の概算試算を含みます。顧客提出や申告判断にそのまま使用せず、個別論点を必ず確認してください。"
+EXCEL_FILE_NAME = "相続シミュレーション_ご提案資料.xlsx"
+EXCEL_TITLE = "山根会計 相続税シミュレーション ご提案資料"
+PDF_FILE_NAME = "相続シミュレーション_ご提案資料.pdf"
+PPT_FILE_NAME = "相続シミュレーション_ご提案資料.pptx"
+GLOBAL_RISK_NOTICE = "本資料は現時点でご提供資料・条件に基づくシミュレーションです。正式申告・実行時には追加確認により変動する場合があります。"
 SECONDARY_RISK_NOTICE = "二次相続は概算ロジックを含む参考表示です。相次相続控除・相続人構成・個別事情の確認前に断定利用しないでください。"
 SMALL_SCALE_RISK_NOTICE = "小規模宅地等は概算判定です。適用可・要確認の表示にかかわらず、実務利用前に要件を別途確認してください。"
 INSURANCE_GIFT_RISK_NOTICE = "生命保険・贈与加算・精算課税は入力内容に依存する概算整理です。証憑確認前の断定利用は禁止です。"
-OUTPUT_RISK_NOTICE = "出力ファイルは内部確認用です。提出前に税務論点・表示内容・主数字の確認を必ず行ってください。"
+OUTPUT_RISK_NOTICE = "本資料は現時点でご提示いただいた資料・条件に基づく試算です。正式申告時には評価資料、分割内容、各種特例の適用可否に応じて金額が変動する場合があります。"
 
 COLOR_NAVY = "1f2c4d"
 COLOR_GOLD = "c5a059"
@@ -2646,119 +2650,794 @@ def create_ppt_report(
     return output.getvalue()
 
 
-def create_excel_file(df1: pd.DataFrame, df_heirs: pd.DataFrame, df_small: pd.DataFrame, df_gifts: pd.DataFrame, df2: pd.DataFrame, df_sim: pd.DataFrame, df_snapshot_summary: pd.DataFrame, df_carryforward: pd.DataFrame, df_audit_notes: pd.DataFrame, df_small_scale_review: pd.DataFrame, df_successive_credit: pd.DataFrame) -> bytes:
-    output = BytesIO()
-    summary_rows = [
-        {"項目": "一次相続税額", "内容": fmt_int(primary_result.total_final_tax) + "円" if False else "コード連動要確認"},
-    ]
-    explanation_summary = pd.DataFrame([
-        {"項目": "資料位置づけ", "内容": "内部確認用・比較検討用"},
-        {"項目": "重点確認", "内容": "一次→二次接続、最小税額帯、要確認論点"},
-        {"項目": "出力利用", "内容": "顧客提出前にレビュー必須"},
-    ])
-    sheet_map = {
-        "説明サマリー（内部確認）": explanation_summary,
-        "一次相続（概算）": df1,
-        "各人別税額（概算）": df_heirs,
-        "小宅判定（要確認）": df_small,
-        "贈与台帳（内部確認）": df_gifts,
-        "二次相続（参考）": df2,
-        "比較表（内部確認）": df_sim,
-        "接続サマリー（内部確認）": df_snapshot_summary,
-        "carry_forward（内部確認）": df_carryforward,
-        "監査メモ（内部確認）": df_audit_notes,
-        "小宅再判定（内部確認）": df_small_scale_review,
-        "相次控除明細（内部確認）": df_successive_credit,
+
+def _to_int_safe(value: Any, default: int = 0) -> int:
+    try:
+        if pd.isna(value):
+            return default
+    except Exception:
+        pass
+    try:
+        return int(Decimal(str(value)).quantize(Decimal("1"), ROUND_HALF_UP))
+    except Exception:
+        try:
+            return int(float(value))
+        except Exception:
+            return default
+
+
+def _extract_ratio_int(value: Any) -> int:
+    text_value = str(value).replace("%", "").strip()
+    if not text_value:
+        return 0
+    return _to_int_safe(text_value, 0)
+
+
+def _yen_text(value: Any) -> str:
+    amount = _to_int_safe(value, 0)
+    sign = "△" if amount < 0 else ""
+    return f"{sign}{abs(amount):,}円"
+
+
+def _ensure_dataframe(df: Optional[pd.DataFrame], columns: list[str]) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=columns)
+    return df.copy()
+
+
+def _normalize_customer_sheet_name(name: str) -> str:
+    replacements = {
+        "内部確認": "ご提案用",
+        "要確認": "確認事項",
+        "carry_forward": "二次相続試算用の引継財産",
+        "監査メモ": "確認事項一覧",
+        "snapshot": "要点整理",
+        "小宅判定": "小規模宅地等の特例 判定結果",
+        "小宅再判定": "小規模宅地等の特例 再確認事項",
     }
+    normalized = name
+    for before, after in replacements.items():
+        normalized = normalized.replace(before, after)
+    return normalized
+
+
+def _sanitize_customer_text(value: Any) -> Any:
+    """顧客向けテキストの自動クレンジング"""
+    if value is None:
+        return ""
+    if isinstance(value, (int, float, Decimal)):
+        return value
+    if pd.isna(value):  # ✅ NaN値の明示的チェック
+        return ""
+    
+    text_value = str(value).strip()
+    replacements = {
+        "内部確認用": "ご提案資料用",
+        "内部確認": "ご提案用",
+        "要確認": "今後の確認事項",
+        "snapshot": "要点整理",
+        "carry forward": "二次相続試算用の引継財産",
+        "carry_forward": "二次相続試算用の引継財産",
+        "監査メモ": "確認事項一覧",
+        "内部ロジック": "計算前提",
+        "リスク": "確認事項",
+        "不明": "未取得資料あり",
+    }
+    for before, after in replacements.items():
+        text_value = text_value.replace(before, after)
+    return text_value
+
+
+def _customerize_dataframe(df: Optional[pd.DataFrame], column_map: dict[str, str], drop_columns: Optional[list[str]] = None) -> pd.DataFrame:
+    work = _ensure_dataframe(df, list(column_map.keys()) if column_map else [])
+    if column_map:
+        rename_targets = {col: column_map.get(col, col) for col in work.columns}
+        work = work.rename(columns=rename_targets)
+    if drop_columns:
+        keep_cols = [col for col in work.columns if col not in drop_columns]
+        work = work[keep_cols]
+    # ✅ applymap → map に変更（Pandas 2.1.0以降対応）
+    work = work.map(_sanitize_customer_text)
+    return work
+
+
+def _choose_recommendation_plan(df_sim: pd.DataFrame, current_ratio: int) -> dict[str, Any]:
+    work = df_sim.copy()
+    if work.empty:
+        return {
+            "recommended_ratio": current_ratio,
+            "min_tax_ratio": current_ratio,
+            "recommended_total_tax": 0,
+            "recommended_primary_tax": 0,
+            "recommended_secondary_tax": 0,
+            "min_total_tax": 0,
+            "equal_total_tax": 0,
+            "diff_vs_min": 0,
+            "diff_vs_equal": 0,
+            "practical_ratio": current_ratio,
+            "recommended_reason": "比較対象データがないため、入力いただいた配分条件を前提に整理しています。",
+            "is_same_as_min": True,
+            "is_same_as_practical": True,
+        }
+
+    work["配分数値"] = work["配分(%)"].apply(_extract_ratio_int)
+    for col in ["一次相続税額", "二次相続税額", "合計納税額"]:
+        work[col] = pd.to_numeric(work[col], errors="coerce").fillna(0)
+
+    work = work.sort_values("配分数値").reset_index(drop=True)
+    min_idx = int(work["合計納税額"].idxmin())
+    min_row = work.loc[min_idx]
+    min_total_tax = _to_int_safe(min_row["合計納税額"])
+    min_ratio = _extract_ratio_int(min_row["配分(%)"])
+
+    equal_candidates = work.iloc[(work["配分数値"] - 50).abs().argsort()[:1]]
+    equal_row = equal_candidates.iloc[0]
+    equal_total_tax = _to_int_safe(equal_row["合計納税額"])
+
+    tolerance = max(int(min_total_tax * 0.03), 1000000)
+    candidate_mask = (
+        (work["合計納税額"] <= min_total_tax + tolerance)
+        & (work["配分数値"] >= 30)
+        & (work["配分数値"] <= 70)
+    )
+    candidates = work[candidate_mask].copy()
+    if candidates.empty:
+        candidates = work.copy()
+    candidates["実務スコア"] = (
+        (candidates["配分数値"] - 50).abs() * 1.3
+        + ((candidates["合計納税額"] - min_total_tax) / max(min_total_tax, 1)) * 100
+    )
+    practical_row = candidates.sort_values(["実務スコア", "配分数値"]).iloc[0]
+    practical_ratio = _extract_ratio_int(practical_row["配分(%)"])
+
+    recommended_row = practical_row
+    recommended_ratio = practical_ratio
+    if abs(practical_ratio - current_ratio) <= 10 and int(practical_row["合計納税額"]) <= min_total_tax + tolerance:
+        recommended_reason = "税額だけでなく、配偶者の生活資金確保、今後の分けやすさ、二次相続のバランスを踏まえて、現状の配分意向に近い範囲で整理した案です。"
+    elif practical_ratio != min_ratio:
+        recommended_reason = "合計税額が最も低い案と比べても差額が大きくなく、配偶者の生活資金、自宅の持ち方、二次相続まで含めた納得感を重視した総合案です。"
+    else:
+        recommended_reason = "税額面でも実務面でもバランスがよく、現時点では総合的に説明しやすい案です。"
+
+    return {
+        "recommended_ratio": recommended_ratio,
+        "min_tax_ratio": min_ratio,
+        "recommended_total_tax": _to_int_safe(recommended_row["合計納税額"]),
+        "recommended_primary_tax": _to_int_safe(recommended_row["一次相続税額"]),
+        "recommended_secondary_tax": _to_int_safe(recommended_row["二次相続税額"]),
+        "min_total_tax": min_total_tax,
+        "equal_total_tax": equal_total_tax,
+        "diff_vs_min": _to_int_safe(recommended_row["合計納税額"]) - min_total_tax,
+        "diff_vs_equal": _to_int_safe(recommended_row["合計納税額"]) - equal_total_tax,
+        "practical_ratio": practical_ratio,
+        "recommended_reason": recommended_reason,
+        "is_same_as_min": recommended_ratio == min_ratio,
+        "is_same_as_practical": recommended_ratio == practical_ratio,
+    }
+
+
+def _build_summary_sheet_df(
+    primary_inputs: PrimaryInputs,
+    primary_result: PrimaryResult,
+    secondary_inputs: SecondaryInputs,
+    secondary_result: SecondaryResult,
+    df_sim: pd.DataFrame,
+    df_audit_notes: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    recommendation = _choose_recommendation_plan(df_sim, secondary_inputs.spouse_acquisition_pct)
+    diff_vs_min = recommendation["diff_vs_min"]
+    diff_vs_equal = recommendation["diff_vs_equal"]
+
+    comparison_comment = "均等分割に近い案と比べて"
+    comparison_delta = diff_vs_equal
+    if comparison_delta == 0:
+        comparison_sentence = "均等分割に近い案との比較でも大きな差はありません。"
+    elif comparison_delta < 0:
+        comparison_sentence = f"{comparison_comment} 合計税額が {abs(comparison_delta):,}円低く、税負担の圧縮効果があります。"
+    else:
+        comparison_sentence = f"{comparison_comment} 合計税額が {abs(comparison_delta):,}円高い一方、分けやすさや生活資金の観点を織り込んだ案です。"
+
+    if diff_vs_min == 0:
+        min_comparison_sentence = "この案は合計税額が最も低い案と同水準です。"
+    else:
+        min_comparison_sentence = f"税額が最も低い案と比べると、合計税額は {abs(diff_vs_min):,}円高くなります。"
+
+    priority_high = []
+    priority_mid = []
+    priority_low = []
+    for _, row in _ensure_dataframe(df_audit_notes, ["分類", "優先度", "内容"]).iterrows():
+        content = _sanitize_customer_text(row.get("内容", ""))
+        priority = str(row.get("優先度", "")).strip()
+        if not content:
+            continue
+        if priority == "高":
+            priority_high.append(content)
+        elif priority == "中":
+            priority_mid.append(content)
+        else:
+            priority_low.append(content)
+
+    if not priority_high:
+        priority_high = ["自宅をどなたが取得するか、遺産分割の方向性を確認します。"]
+    if not priority_mid:
+        priority_mid = ["預金の配分方針と、配偶者の今後の生活資金見込みを確認します。"]
+    if not priority_low:
+        priority_low = ["保険受取人、登記、名義の整備状況を順次確認します。"]
+
+    summary_df = pd.DataFrame(
+        [
+            ["現時点推奨案", f"配偶者取得割合 {recommendation['recommended_ratio']}% 案"],
+            ["税額が最も低い案", f"配偶者取得割合 {recommendation['min_tax_ratio']}% 案"],
+            ["実務上の推奨案", f"配偶者取得割合 {recommendation['practical_ratio']}% 案"],
+            ["一次相続税額", _yen_text(recommendation["recommended_primary_tax"])],
+            ["二次相続税額", _yen_text(recommendation["recommended_secondary_tax"])],
+            ["合計税額", _yen_text(recommendation["recommended_total_tax"])],
+            ["他案との差額", min_comparison_sentence],
+            ["比較コメント", comparison_sentence],
+            ["推奨理由", recommendation["recommended_reason"]],
+            ["推奨アクション", "現時点では上記割合をたたき台として、配偶者の生活資金・自宅の帰属・納税資金を確認しながら分割方針を具体化することをおすすめします。"],
+            ["今後の確認事項（優先度 高）", " / ".join(priority_high[:3])],
+            ["今後の確認事項（優先度 中）", " / ".join(priority_mid[:3])],
+            ["今後の確認事項（優先度 低）", " / ".join(priority_low[:3])],
+        ],
+        columns=["項目", "内容"],
+    )
+
+    title_text = (
+        f"現時点では、配偶者取得割合 {recommendation['recommended_ratio']}% 案を総合的なご提案案として整理しています。"
+        f" 一次相続税額は {_yen_text(recommendation['recommended_primary_tax'])}、"
+        f"二次相続税額は {_yen_text(recommendation['recommended_secondary_tax'])}、"
+        f"合計税額は {_yen_text(recommendation['recommended_total_tax'])} です。"
+        f" {min_comparison_sentence} {comparison_sentence}"
+    )
+    title_df = pd.DataFrame([["結論サマリー", title_text]], columns=["区分", "内容"])
+    return summary_df, title_df
+
+
+def _build_comparison_sheet_df(df_sim: pd.DataFrame, secondary_inputs: SecondaryInputs) -> pd.DataFrame:
+    work = df_sim.copy()
+    if work.empty:
+        return pd.DataFrame(columns=["配偶者取得割合", "一次相続税額", "二次相続税額", "合計税額", "比較コメント", "位置づけ"])
+    work["配偶者取得割合"] = work["配分(%)"]
+    for col in ["一次相続税額", "二次相続税額", "合計納税額"]:
+        work[col] = pd.to_numeric(work[col], errors="coerce").fillna(0)
+    min_total = int(work["合計納税額"].min()) if not work.empty else 0
+    equal_row = work.iloc[(work["配分(%)"].apply(_extract_ratio_int) - 50).abs().argsort()[:1]].iloc[0] if not work.empty else None
+
+    rows: list[dict[str, Any]] = []
+    for _, row in work.sort_values(by="配偶者取得割合", key=lambda s: s.astype(str).str.replace("%", "", regex=False).astype(int)).iterrows():
+        total = _to_int_safe(row["合計納税額"])
+        ratio = _extract_ratio_int(row["配分(%)"])
+        if total == min_total:
+            position = "税額が最も低い案"
+        elif ratio == secondary_inputs.spouse_acquisition_pct:
+            position = "現在入力中の案"
+        elif equal_row is not None and ratio == _extract_ratio_int(equal_row["配分(%)"]):
+            position = "均等分割に近い案"
+        else:
+            position = "比較案"
+
+        diff = total - min_total
+        if diff == 0:
+            comment = "合計税額が最も低い水準です。"
+        elif row["一次相続税額"] < row["二次相続税額"]:
+            comment = f"最小税額案との差額は {abs(diff):,}円。一次は抑えやすい一方、二次で税額が増えやすい傾向です。"
+        else:
+            comment = f"最小税額案との差額は {abs(diff):,}円。一次の納税負担は増える一方、二次の圧縮効果が見込まれます。"
+
+        rows.append(
+            {
+                "配偶者取得割合": row["配偶者取得割合"],
+                "一次相続税額": _to_int_safe(row["一次相続税額"]),
+                "二次相続税額": _to_int_safe(row["二次相続税額"]),
+                "合計税額": total,
+                "比較コメント": comment,
+                "位置づけ": position,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _build_primary_overview_sheet_df(df1: pd.DataFrame, df_heirs: pd.DataFrame, df_small: pd.DataFrame, df_gifts: pd.DataFrame) -> pd.DataFrame:
+    primary_overview = _customerize_dataframe(
+        df1,
+        {
+            "項目": "項目",
+            "金額": "金額",
+            "備考": "内容",
+            "内容": "内容",
+        },
+    )
+    # ✅ 区分列が既に存在するか確認してから挿入
+    if "区分" not in primary_overview.columns:
+        primary_overview.insert(0, "区分", "一次相続の概要")
+
+    heir_sheet = _customerize_dataframe(
+        df_heirs,
+        {
+            "相続人": "相続人",
+            "続柄": "続柄",
+            "課税価格": "各相続人ごとの課税対象額",
+            "各人別課税価格": "各相続人ごとの課税対象額",
+            "按分前税額": "配分調整前の税額",
+            "最終税額": "最終税額",
+            "配偶者軽減": "配偶者軽減額",
+            "保険非課税": "生命保険の非課税額",
+            "加算税額": "2割加算額",
+            "備考": "内容",
+            "注記": "内容",
+        },
+    )
+    if "区分" not in heir_sheet.columns:
+        heir_sheet.insert(0, "区分", "相続人別整理")
+
+    small_sheet = _customerize_dataframe(
+        df_small,
+        {
+            "対象宅地": "対象宅地",
+            "宅地": "対象宅地",
+            "状態": "判定結果",
+            "適用状況": "判定結果",
+            "理由": "内容",
+            "減額額": "減額見込額",
+            "備考": "内容",
+            "注記": "内容",
+        },
+    )
+    if "区分" not in small_sheet.columns:
+        small_sheet.insert(0, "区分", "小規模宅地等の特例 判定結果")
+
+    gifts_sheet = _customerize_dataframe(
+        df_gifts,
+        {
+            "贈与日": "贈与日",
+            "受贈者": "受贈者",
+            "課税方式": "贈与方式",
+            "贈与額": "贈与額",
+            "加算対象": "相続財産へ反映",
+            "相続戻し対象額": "相続財産へ反映する金額",
+            "判定理由": "内容",
+        },
+        drop_columns=["年分"],
+    )
+    if "区分" not in gifts_sheet.columns:
+        gifts_sheet.insert(0, "区分", "贈与・保険等の確認事項")
+
+    sections = [df for df in [primary_overview, heir_sheet, small_sheet, gifts_sheet] if df is not None and not df.empty]
+    if not sections:
+        return pd.DataFrame(columns=["区分", "項目", "内容"])
+    return pd.concat(sections, ignore_index=True, sort=False)
+
+def _build_secondary_overview_sheet_df(df2: pd.DataFrame, df_carryforward: pd.DataFrame, df_successive_credit: pd.DataFrame) -> pd.DataFrame:
+    secondary_overview = _customerize_dataframe(
+        df2,
+        {
+            "No": "No",
+            "項目": "項目",
+            "金額": "金額",
+            "備考": "内容",
+        },
+    )
+    # ✅ 区分列が既に存在するか確認してから挿入
+    if "区分" not in secondary_overview.columns:
+        secondary_overview.insert(0, "区分", "二次相続の概要")
+
+    carryforward_sheet = _customerize_dataframe(
+        df_carryforward,
+        {
+            "相続人": "相続人",
+            "続柄": "続柄",
+            "取得総額": "一次相続での取得総額",
+            "現預金": "現預金",
+            "不動産": "不動産",
+            "保険": "生命保険",
+            "有価証券": "有価証券",
+            "その他": "その他",
+            "一次税額": "一次相続税額",
+            "税引後残高": "税引後の残額",
+            "同居": "自宅同居の有無",
+            "事業利用": "事業利用の有無",
+            "注記": "内容",
+        },
+    )
+    if "区分" not in carryforward_sheet.columns:
+        carryforward_sheet.insert(0, "区分", "二次相続試算用の引継財産")
+
+    credit_sheet = _customerize_dataframe(
+        df_successive_credit,
+        {
+            "相続人": "相続人",
+            "按分比率": "按分比率",
+            "按分前控除額": "按分前の控除額",
+            "反映控除額": "反映控除額",
+            "注記": "内容",
+            "備考": "計算前提",
+        },
+    )
+    if "区分" not in credit_sheet.columns:
+        credit_sheet.insert(0, "区分", "相次相続控除の整理")
+
+    sections = [df for df in [secondary_overview, carryforward_sheet, credit_sheet] if df is not None and not df.empty]
+    if not sections:
+        return pd.DataFrame(columns=["区分", "項目", "内容"])
+    return pd.concat(sections, ignore_index=True, sort=False)
+
+def _build_confirmation_sheet_df(df_audit_notes: pd.DataFrame, df_small_scale_review: pd.DataFrame) -> pd.DataFrame:
+    notes_sheet = _customerize_dataframe(
+        df_audit_notes,
+        {
+            "分類": "区分",
+            "優先度": "優先度",
+            "内容": "今後の確認事項",
+        },
+    )
+    if not notes_sheet.empty:
+        # ✅ 既存の「区分」列の値を標準化
+        notes_sheet["区分"] = notes_sheet["区分"].fillna("").astype(str).str.replace(
+            {
+                "再判定事項": "今後の確認事項",
+                "未充足事項": "今後の確認事項",
+                "リスク事項": "今後の確認事項",
+                "概算調整事項": "今後の確認事項",
+                "税額調整メモ": "今後の確認事項",
+                "小宅再判定事項": "今後の確認事項",
+                "小宅再判定メモ": "今後の確認事項",
+            },
+            regex=False,
+        )
+
+    review_sheet = _customerize_dataframe(
+        df_small_scale_review,
+        {
+            "対象宅地": "対象宅地",
+            "状態": "判定結果",
+            "一次取得者": "一次相続での取得者",
+            "再判定アクション": "次回までに確認したい事項",
+            "理由": "内容",
+            "注記": "補足",
+        },
+    )
+    if not review_sheet.empty and "区分" not in review_sheet.columns:
+        review_sheet.insert(0, "区分", "小規模宅地等の特例に関する確認事項")
+        review_sheet.insert(1, "優先度", "高")
+
+    if notes_sheet.empty and review_sheet.empty:
+        notes_sheet = pd.DataFrame(
+            [["今後の確認事項", "中", "現時点では追加の重大論点はありません。分割方針と資料確認を進める想定です。"]],
+            columns=["区分", "優先度", "今後の確認事項"],
+        )
+    
+    sections = [df for df in [notes_sheet, review_sheet] if df is not None and not df.empty]
+    if not sections:
+        return pd.DataFrame(columns=["区分", "優先度", "今後の確認事項"])
+    
+    return pd.concat(sections, ignore_index=True, sort=False)
+
+def _build_assumptions_sheet_df(primary_inputs: PrimaryInputs, secondary_inputs: SecondaryInputs, primary_result: PrimaryResult, secondary_result: SecondaryResult) -> pd.DataFrame:
+    heir_summary = []
+    if primary_inputs.has_spouse:
+        heir_summary.append("配偶者")
+    for idx, heir in enumerate(primary_inputs.heirs_info, start=1):
+        heir_summary.append(f"相続人{idx}（{heir.get('type', '')}）")
+
+    assumption_rows = [
+        ["相続人構成の前提", "、".join(heir_summary) if heir_summary else "入力情報に基づき作成"],
+        ["財産評価の前提", f"一次相続の純資産総額は {_yen_text(primary_result.pure_as)} を基準に整理しています。"],
+        ["不動産評価の前提", "土地・建物は入力いただいた評価額を前提としており、正式評価や現地確認により変動する場合があります。"],
+        ["特例適用の前提", "配偶者の税額軽減、生命保険非課税、小規模宅地等の特例、相次相続控除は入力内容に基づく試算です。"],
+        ["二次相続の前提", f"配偶者固有財産 {_yen_text(secondary_inputs.s_own)}、年間生活費 {_yen_text(secondary_inputs.annual_spend)}、経過年数 {secondary_inputs.interval_years}年 を前提にしています。"],
+        ["未確定資料がある場合", "遺言書、保険受取人、登記、借入残高、贈与履歴などの確認により結果が変わることがあります。"],
+        ["本試算の位置づけ", OUTPUT_RISK_NOTICE],
+    ]
+    if secondary_result.tax_adjustment_notes:
+        assumption_rows.append(["補足前提", " / ".join([_sanitize_customer_text(x) for x in secondary_result.tax_adjustment_notes[:3]])])
+    return pd.DataFrame(assumption_rows, columns=["項目", "内容"])
+
+
+def _build_next_steps_sheet_df(recommendation_df: pd.DataFrame) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            ["1", "自宅をどなたが取得するかを確認し、分割方針を具体化します。"],
+            ["2", "預金・生命保険・有価証券の配分方針を整理し、納税資金を確認します。"],
+            ["3", "二次相続をどの程度重視するかをご家族で共有します。"],
+            ["4", "遺言書の有無、保険受取人、登記名義を確認します。"],
+            ["5", "確認後、必要に応じて配分割合を再試算し、最終提案案を固めます。"],
+        ],
+        columns=["No", "次回までにご確認いただきたい事項"],
+    )
+
+
+def _write_dataframe_to_sheet(
+    ws,
+    df: pd.DataFrame,
+    start_row: int,
+    title: str,
+    description: str,
+    styles: dict[str, Any],
+) -> int:
+    max_col = max(2, len(df.columns) if not df.empty else 2)
+    end_col_letter = get_column_letter(max_col)
+
+    ws.merge_cells(start_row=start_row, start_column=1, end_row=start_row, end_column=max_col)
+    title_cell = ws.cell(row=start_row, column=1, value=title)
+    title_cell.font = styles["section_title_font"]
+    title_cell.fill = styles["section_fill"]
+    title_cell.alignment = styles["left_align"]
+
+    ws.merge_cells(start_row=start_row + 1, start_column=1, end_row=start_row + 1, end_column=max_col)
+    desc_cell = ws.cell(row=start_row + 1, column=1, value=description)
+    desc_cell.alignment = styles["left_align"]
+    desc_cell.fill = styles["soft_fill"]
+    desc_cell.border = styles["thin_border"]
+
+    header_row = start_row + 3
+    if df.empty:
+        ws.cell(row=header_row, column=1, value="項目")
+        ws.cell(row=header_row, column=2, value="内容")
+        ws.cell(row=header_row + 1, column=1, value="ご案内")
+        ws.cell(row=header_row + 1, column=2, value="現時点では表示対象データがありません。")
+        data_columns = ["項目", "内容"]
+        data_rows = [["ご案内", "現時点では表示対象データがありません。"]]
+        actual_cols = 2
+    else:
+        data_columns = list(df.columns)
+        data_rows = df.values.tolist()
+        actual_cols = len(data_columns)
+        for col_idx, col_name in enumerate(data_columns, start=1):
+            ws.cell(row=header_row, column=col_idx, value=col_name)
+
+    for col_idx in range(1, actual_cols + 1):
+        cell = ws.cell(row=header_row, column=col_idx)
+        cell.fill = styles["header_fill"]
+        cell.font = styles["header_font"]
+        cell.alignment = styles["center_align"]
+        cell.border = styles["thin_border"]
+
+    for row_offset, row_values in enumerate(data_rows, start=1):
+        row_idx = header_row + row_offset
+        for col_idx, value in enumerate(row_values, start=1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+            cell.border = styles["thin_border"]
+            if isinstance(value, Number):
+                cell.number_format = '#,##0'
+                cell.alignment = styles["right_align"]
+            else:
+                cell.alignment = styles["left_align"]
+
+    return header_row + len(data_rows) + 2
+
+
+def _apply_sheet_layout(ws, title: str, subtitle: str, orientation: str, fit_width: int = 1) -> None:
+    ws.sheet_view.showGridLines = False
+    ws.freeze_panes = "A5"
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.orientation = orientation
+    ws.page_setup.fitToPage = True
+    ws.page_setup.fitToWidth = fit_width
+    ws.page_setup.fitToHeight = 0
+    ws.page_margins = PageMargins(left=0.35, right=0.35, top=0.5, bottom=0.5, header=0.2, footer=0.2)
+    ws.oddHeader.center.text = f"&\"Meiryo,Bold\"&14 {title}"
+    ws.oddFooter.right.text = "&P / &N"
+    ws["A1"] = EXCEL_TITLE
+    ws["A1"].font = Font(name="Meiryo", size=16, bold=True, color="1F2C4D")
+    ws["A2"] = subtitle
+    ws["A2"].font = Font(name="Meiryo", size=10, color="556070")
+    ws["A3"] = OUTPUT_RISK_NOTICE
+    ws["A3"].font = Font(name="Meiryo", size=9, color="556070")
+    ws.row_dimensions[1].height = 24
+    ws.row_dimensions[2].height = 20
+    ws.row_dimensions[3].height = 30
+
+
+def _autosize_and_format_sheet(ws, numeric_keywords: Optional[list[str]] = None) -> None:
+    numeric_keywords = numeric_keywords or ["税額", "金額", "額", "残高", "財産", "控除", "減額", "差額", "取得総額", "取得額"]
+    widths: dict[int, int] = {}
+    for row in ws.iter_rows():
+        for cell in row:
+            cell.font = Font(name="Meiryo", size=10, bold=cell.font.bold, italic=cell.font.italic, color=cell.font.color.rgb if cell.font.color and cell.font.color.type == "rgb" else None)
+            value = cell.value
+            if value is None:
+                continue
+            text_value = str(value)
+            widths[cell.column] = max(widths.get(cell.column, 0), len(text_value.encode("utf-8")) // 2 + 2)
+            if cell.row >= 4 and any(keyword in str(ws.cell(row=4, column=cell.column).value or "") for keyword in numeric_keywords):
+                if isinstance(value, Number):
+                    cell.number_format = '#,##0'
+                    cell.alignment = Alignment(horizontal="right", vertical="center", wrap_text=False)
+            if cell.row >= 4 and not isinstance(value, Number):
+                cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    for col_idx, width in widths.items():
+        ws.column_dimensions[get_column_letter(col_idx)].width = min(max(width, 12), 36)
+    for row_idx in range(4, ws.max_row + 1):
+        ws.row_dimensions[row_idx].height = max(ws.row_dimensions[row_idx].height or 18, 20)
+
+
+def _insert_comparison_chart(ws, df_comp: pd.DataFrame, recommended_ratio: int) -> None:
+    if df_comp.empty:
+        return
+    chart_start_row = 5
+    data_start_row = chart_start_row + 18
+    chart_df = df_comp.copy()
+    chart_df["推奨案マーク"] = chart_df.apply(
+        lambda row: row["合計税額"] if _extract_ratio_int(row["配偶者取得割合"]) == recommended_ratio else None,
+        axis=1,
+    )
+    for col_idx, col_name in enumerate(chart_df.columns, start=1):
+        ws.cell(row=data_start_row, column=col_idx, value=col_name)
+    for row_offset, values in enumerate(chart_df.values.tolist(), start=1):
+        for col_idx, value in enumerate(values, start=1):
+            ws.cell(row=data_start_row + row_offset, column=col_idx, value=value)
+
+    bar = BarChart()
+    bar.type = "col"
+    bar.style = 10
+    bar.overlap = 0
+    bar.y_axis.title = "税額（円）"
+    bar.x_axis.title = "配偶者取得割合"
+    bar.height = 8.5
+    bar.width = 15.5
+    data = Reference(ws, min_col=2, max_col=4, min_row=data_start_row, max_row=data_start_row + len(chart_df))
+    cats = Reference(ws, min_col=1, min_row=data_start_row + 1, max_row=data_start_row + len(chart_df))
+    bar.add_data(data, titles_from_data=True)
+    bar.set_categories(cats)
+
+    line = LineChart()
+    line.height = 8.5
+    line.width = 15.5
+    line.y_axis.axId = 200
+    line.y_axis.title = "推奨案"
+    line_data = Reference(ws, min_col=6, max_col=6, min_row=data_start_row, max_row=data_start_row + len(chart_df))
+    line.add_data(line_data, titles_from_data=True)
+    line.set_categories(cats)
+    if line.series:
+        line.series[0].graphicalProperties.line.noFill = True
+        line.series[0].marker.symbol = "diamond"
+        line.series[0].marker.size = 12
+
+    bar += line
+    ws.add_chart(bar, "A5")
+    for row in range(data_start_row, data_start_row + len(chart_df) + 2):
+        ws.row_dimensions[row].hidden = True
+    for col in range(1, 7):
+        ws.column_dimensions[get_column_letter(col)].hidden = col >= 5
+
+
+def create_excel_file(
+    primary_inputs: PrimaryInputs,
+    primary_result: PrimaryResult,
+    secondary_inputs: SecondaryInputs,
+    secondary_result: SecondaryResult,
+    df1: pd.DataFrame,
+    df_heirs: pd.DataFrame,
+    df_small: pd.DataFrame,
+    df_gifts: pd.DataFrame,
+    df2: pd.DataFrame,
+    df_sim: pd.DataFrame,
+    df_snapshot_summary: pd.DataFrame,
+    df_carryforward: pd.DataFrame,
+    df_audit_notes: pd.DataFrame,
+    df_small_scale_review: pd.DataFrame,
+    df_successive_credit: pd.DataFrame,
+) -> bytes:
+    summary_df, summary_text_df = _build_summary_sheet_df(
+        primary_inputs,
+        primary_result,
+        secondary_inputs,
+        secondary_result,
+        df_sim,
+        df_audit_notes,
+    )
+    recommendation = _choose_recommendation_plan(df_sim, secondary_inputs.spouse_acquisition_pct)
+    comparison_df = _build_comparison_sheet_df(df_sim, secondary_inputs)
+    primary_overview_df = _build_primary_overview_sheet_df(df1, df_heirs, df_small, df_gifts)
+    secondary_overview_df = _build_secondary_overview_sheet_df(df2, df_carryforward, df_successive_credit)
+    confirmation_df = _build_confirmation_sheet_df(df_audit_notes, df_small_scale_review)
+    assumptions_df = _build_assumptions_sheet_df(primary_inputs, secondary_inputs, primary_result, secondary_result)
+    next_steps_df = _build_next_steps_sheet_df(summary_df)
+
+    output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        for sheet_name, df in sheet_map.items():
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
+        pd.DataFrame().to_excel(writer, sheet_name="結論サマリー", index=False)
+        pd.DataFrame().to_excel(writer, sheet_name="税額比較一覧", index=False)
+        primary_overview_df.to_excel(writer, sheet_name="一次相続の整理", index=False, startrow=3)
+        secondary_overview_df.to_excel(writer, sheet_name="二次相続の整理", index=False, startrow=3)
+        confirmation_df.to_excel(writer, sheet_name="今後の確認事項", index=False, startrow=3)
+        assumptions_df.to_excel(writer, sheet_name="前提条件", index=False, startrow=3)
+        next_steps_df.to_excel(writer, sheet_name="今後の進め方", index=False, startrow=3)
 
     output.seek(0)
     wb = load_workbook(output)
 
-    header_fill = PatternFill(start_color=COLOR_NAVY, end_color=COLOR_NAVY, fill_type="solid")
-    header_font = Font(color="FFFFFF", bold=True)
-    title_font = Font(size=14, bold=True)
-    subtitle_font = Font(size=10, italic=True, color="666666")
-    notice_fill = PatternFill(start_color="FFF4CC", end_color="FFF4CC", fill_type="solid")
-    notice_font = Font(color="7A5C00", bold=True)
-    section_fill = PatternFill(start_color="E9EEF7", end_color="E9EEF7", fill_type="solid")
-    center_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    left_align = Alignment(horizontal="left", vertical="center", wrap_text=True)
-    thin_border = Border(
-        left=Side(style="thin"),
-        right=Side(style="thin"),
-        top=Side(style="thin"),
-        bottom=Side(style="thin"),
+    styles = {
+        "header_fill": PatternFill(start_color="1F2C4D", end_color="1F2C4D", fill_type="solid"),
+        "header_font": Font(name="Meiryo", color="FFFFFF", bold=True),
+        "section_fill": PatternFill(start_color="DCE6F2", end_color="DCE6F2", fill_type="solid"),
+        "soft_fill": PatternFill(start_color="F4F6F8", end_color="F4F6F8", fill_type="solid"),
+        "highlight_fill": PatternFill(start_color="E5F0EA", end_color="E5F0EA", fill_type="solid"),
+        "accent_fill": PatternFill(start_color="FFF4DE", end_color="FFF4DE", fill_type="solid"),
+        "section_title_font": Font(name="Meiryo", size=12, bold=True, color="1F2C4D"),
+        "thin_border": Border(left=Side(style="thin", color="C9CED6"), right=Side(style="thin", color="C9CED6"), top=Side(style="thin", color="C9CED6"), bottom=Side(style="thin", color="C9CED6")),
+        "left_align": Alignment(horizontal="left", vertical="center", wrap_text=True),
+        "center_align": Alignment(horizontal="center", vertical="center", wrap_text=True),
+        "right_align": Alignment(horizontal="right", vertical="center", wrap_text=False),
+    }
+
+    summary_ws = wb["結論サマリー"]
+    _apply_sheet_layout(summary_ws, "結論サマリー", "まず最初に、税額と実務面を合わせた現時点のご提案を整理しています。", "landscape", 1)
+    current_row = 5
+    current_row = _write_dataframe_to_sheet(
+        summary_ws,
+        summary_text_df,
+        current_row,
+        "総括コメント",
+        "ご家族での話し合いの起点になるよう、結論を文章でも読みやすく整理しています。",
+        styles,
     )
+    current_row = _write_dataframe_to_sheet(
+        summary_ws,
+        summary_df,
+        current_row + 1,
+        "結論サマリー",
+        "税額だけでなく、配偶者の生活資金・自宅の持ち方・二次相続まで含めて整理した現時点の推奨内容です。",
+        styles,
+    )
+    _insert_comparison_chart(summary_ws, comparison_df[["配偶者取得割合", "一次相続税額", "二次相続税額", "合計税額"]], recommendation["recommended_ratio"])
+    summary_ws["A5"].fill = styles["highlight_fill"]
+    summary_ws["A5"].font = styles["section_title_font"]
+    for row in summary_ws.iter_rows(min_row=5, max_row=summary_ws.max_row):
+        for cell in row:
+            cell.border = styles["thin_border"]
+
+    comparison_ws = wb["税額比較一覧"]
+    _apply_sheet_layout(comparison_ws, "税額比較一覧", "配偶者取得割合ごとの一次・二次・合計税額を比較しています。", "landscape", 1)
+    _write_dataframe_to_sheet(
+        comparison_ws,
+        comparison_df,
+        5,
+        "税額比較一覧",
+        "税額が最も低い案、実務上の推奨案、現在の想定案の違いを一覧で確認できます。",
+        styles,
+    )
+
+    primary_ws = wb["一次相続の整理"]
+    _apply_sheet_layout(primary_ws, "一次相続の整理", "一次相続の計算根拠、相続人ごとの税額、小規模宅地等の特例や贈与整理をまとめています。", "portrait", 1)
+
+    secondary_ws = wb["二次相続の整理"]
+    _apply_sheet_layout(secondary_ws, "二次相続の整理", "一次相続から二次相続へどう影響するかを整理しています。", "portrait", 1)
+
+    confirmation_ws = wb["今後の確認事項"]
+    _apply_sheet_layout(confirmation_ws, "今後の確認事項", "不安を煽らない形で、次回までに確認したい事項を優先度別に整理しています。", "portrait", 1)
+
+    assumptions_ws = wb["前提条件"]
+    _apply_sheet_layout(assumptions_ws, "前提条件", "本試算の前提条件と、正式申告までに変動し得るポイントを整然とまとめています。", "portrait", 1)
+
+    next_steps_ws = wb["今後の進め方"]
+    _apply_sheet_layout(next_steps_ws, "今後の進め方", "次回面談までにご確認いただきたい事項と、今後の進め方を整理しています。", "portrait", 1)
 
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
-        max_col = max(1, ws.max_column)
-        ws.insert_rows(1, amount=4)
-        end_col_letter = ws.cell(row=1, column=max_col).column_letter
-
-        ws.merge_cells(f"A1:{end_col_letter}1")
-        ws["A1"] = EXCEL_TITLE
-        ws["A1"].font = title_font
-        ws["A1"].alignment = left_align
-
-        ws.merge_cells(f"A2:{end_col_letter}2")
-        ws["A2"] = f"シート名: {sheet_name}"
-        ws["A2"].font = subtitle_font
-        ws["A2"].alignment = left_align
-
-        ws.merge_cells(f"A3:{end_col_letter}3")
-        ws["A3"] = OUTPUT_RISK_NOTICE
-        ws["A3"].fill = notice_fill
-        ws["A3"].font = notice_font
-        ws["A3"].alignment = left_align
-        ws.row_dimensions[3].height = 36
-
-        ws.merge_cells(f"A4:{end_col_letter}4")
-        ws["A4"] = "用途: 内部確認・比較検討用。顧客提出前に税務論点・主数字・注記のレビューを必ず実施してください。"
-        ws["A4"].fill = section_fill
-        ws["A4"].alignment = left_align
-        ws.row_dimensions[4].height = 30
-
-        header_row = 5
-        for cell in ws[header_row]:
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.alignment = center_align
-            cell.border = thin_border
-
-        for row in ws.iter_rows(min_row=header_row + 1):
+        for row in ws.iter_rows():
             for cell in row:
-                cell.border = thin_border
-                if isinstance(cell.value, Number):
-                    cell.number_format = "#,##0"
-                    cell.alignment = center_align
-                else:
-                    cell.alignment = left_align
+                if cell.value is not None:
+                    cell.value = _sanitize_customer_text(cell.value)
+                if cell.row >= 4:
+                    cell.border = styles["thin_border"]
+        _autosize_and_format_sheet(ws)
+        ws.print_options.gridLines = False
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+        ws.print_title_rows = "$1:$4"
 
-        ws.freeze_panes = "A6"
-        ws.auto_filter.ref = f"A{header_row}:{end_col_letter}{max(header_row, ws.max_row)}"
-
-        for col_idx in range(1, max_col + 1):
-            max_length = 0
-            col_letter = ws.cell(row=header_row, column=col_idx).column_letter
-            for row_idx in range(1, ws.max_row + 1):
-                value = ws.cell(row=row_idx, column=col_idx).value
-                if value is not None:
-                    max_length = max(max_length, len(str(value)))
-            adjusted_width = min(max(max_length + 2, 12), 32)
-            ws.column_dimensions[col_letter].width = adjusted_width
-
-        if max_col >= 1:
-            ws.column_dimensions["A"].width = max(ws.column_dimensions["A"].width, 18)
-        ws.sheet_view.showGridLines = True
+    comparison_ws.freeze_panes = "A5"
+    comparison_ws.auto_filter.ref = f"A8:{get_column_letter(max(1, comparison_ws.max_column))}{comparison_ws.max_row}"
+    primary_ws.auto_filter.ref = f"A4:{get_column_letter(max(1, primary_ws.max_column))}{primary_ws.max_row}"
+    secondary_ws.auto_filter.ref = f"A4:{get_column_letter(max(1, secondary_ws.max_column))}{secondary_ws.max_row}"
+    confirmation_ws.auto_filter.ref = f"A4:{get_column_letter(max(1, confirmation_ws.max_column))}{confirmation_ws.max_row}"
+    assumptions_ws.auto_filter.ref = f"A4:{get_column_letter(max(1, assumptions_ws.max_column))}{assumptions_ws.max_row}"
+    next_steps_ws.auto_filter.ref = f"A4:{get_column_letter(max(1, next_steps_ws.max_column))}{next_steps_ws.max_row}"
 
     final_output = BytesIO()
     wb.save(final_output)
     return final_output.getvalue()
-
 
 def build_simulation_figure(df_sim: pd.DataFrame) -> go.Figure:
     plot_df = df_sim.copy()
@@ -3157,10 +3836,10 @@ def render_tab_analysis(primary_inputs: PrimaryInputs, primary_result: PrimaryRe
     render_risk_notice(OUTPUT_RISK_NOTICE)
     col_excel, col_pdf, col_ppt = st.columns(3)
     try:
-        excel_data = create_excel_file(df1, df_heirs, df_small, df_gifts, df2, df_sim, df_snapshot_summary, df_carryforward, df_audit_notes, df_small_scale_review, df_successive_credit)
+        excel_data = create_excel_file(primary_inputs, primary_result, secondary_inputs, secondary_result, df1, df_heirs, df_small, df_gifts, df2, df_sim, df_snapshot_summary, df_carryforward, df_audit_notes, df_small_scale_review, df_successive_credit)
         with col_excel:
             st.download_button(
-                label="📊 Excelファイルをダウンロード（内部確認用）",
+                label="📊 Excelファイルをダウンロード（ご提案資料）",
                 data=excel_data,
                 file_name=EXCEL_FILE_NAME,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
