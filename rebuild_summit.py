@@ -9,8 +9,13 @@ from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from io import BytesIO
 from numbers import Number
+import math
 import os
+import re
+import unicodedata
 from typing import Any, Optional
+
+
 @dataclass
 class CalculationContext:
     """
@@ -21,7 +26,7 @@ class CalculationContext:
     secondary_inputs: Optional[dict] = field(default_factory=dict)
     primary_result: Optional[dict] = field(default_factory=dict)
     common_config: dict = field(default_factory=dict)
-    
+
     # 拡張性を考慮し、動的な属性追加を許可
     def __post_init__(self):
         if self.primary_inputs is None:
@@ -29,12 +34,12 @@ class CalculationContext:
         if self.secondary_inputs is None:
             self.secondary_inputs = {}
 
+
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-import streamlit.components.v1 as components
 from openpyxl import load_workbook
-from openpyxl.chart import BarChart, LineChart, Reference
+from openpyxl.chart import BarChart, Reference
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.page import PageMargins
@@ -45,8 +50,15 @@ from reportlab.lib.units import mm
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfbase.pdfmetrics import registerFont
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.graphics.charts.barcharts import VerticalBarChart
+from reportlab.graphics.shapes import Drawing, Line, String
 from pptx import Presentation
+from pptx.chart.data import CategoryChartData
+from pptx.enum.chart import XL_CHART_TYPE, XL_DATA_LABEL_POSITION, XL_LEGEND_POSITION
+from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE
+from pptx.enum.text import MSO_ANCHOR, MSO_AUTO_SIZE, PP_ALIGN
 from pptx.util import Inches, Pt
+from pptx.dml.color import RGBColor
 
 st.set_page_config(page_title="SUMMIT v31.16 PRO", layout="wide")
 
@@ -69,6 +81,15 @@ OUTPUT_RISK_NOTICE = "本資料は現時点でご提示いただいた資料・�
 COLOR_NAVY = "1f2c4d"
 COLOR_GOLD = "c5a059"
 COLOR_RED = "a61d24"
+COLOR_BLUE = "1E5AA8"
+COLOR_SKY = "DCEAFB"
+COLOR_LIGHT_BLUE = "EDF5FF"
+COLOR_LIGHT_RED = "FDECEC"
+COLOR_GRAY = "666666"
+COLOR_LIGHT_GRAY = "E9EDF3"
+COLOR_DARK = "22324A"
+COLOR_GREEN = "3D7A57"
+COLOR_TEXT = "333333"
 
 SMALL_SCALE_HOME_LIMIT = Decimal("330")
 SMALL_SCALE_BUSINESS_LIMIT = Decimal("400")
@@ -125,6 +146,8 @@ TAB_LABELS = [
 # =========================================================
 # 2. Data Models
 # =========================================================
+
+
 @dataclass
 class PrimaryInputs:
     heir_count: int
@@ -594,8 +617,6 @@ def is_two_tenths_surtax_target(heir_type: str, is_substitute: bool = False) -> 
     return False
 
 
-
-
 def get_app_password() -> str | None:
     secret_password = None
     try:
@@ -659,7 +680,7 @@ def add_print_button(tab_name: str) -> None:
             </button>
         </div>
     """
-    components.html(html_code, height=60)
+    st.html(html_code)
 
 
 # =========================================================
@@ -811,7 +832,6 @@ def normalize_actual_acquisition_plan(
         return [Decimal("0")] * len(fallback_shares), normalized_amounts
     actual_shares = [amount / total_taxable_price for amount in normalized_amounts]
     return actual_shares, normalized_amounts
-
 
 
 def allocate_taxable_prices(total_taxable_price: Decimal, actual_shares: list[Decimal]) -> list[Decimal]:
@@ -1226,6 +1246,7 @@ def calculate_primary_inheritance(inputs: PrimaryInputs, secondary_inputs: Secon
         heir_tax_records=heir_tax_records,
     )
 
+
 def build_secondary_starting_estate(
     snapshot: Any,  # PrimaryToSecondarySnapshot
     context: Any,   # SecondarySimulationContext または CalculationContext
@@ -1238,7 +1259,7 @@ def build_secondary_starting_estate(
     # 既存ロジックを維持しつつ、contextからの取得を安全に行う
     years = getattr(context, 'years_until_second_inheritance', 0)
     annual_living_cost = getattr(context, 'annual_living_cost', 0)
-    
+
     # Decimal型への変換を伴う計算（to_dはプロジェクト内共通関数と想定）
     living_cost_adjustment_amount = quantize_yen(
         Decimal(str(annual_living_cost)) * Decimal(str(years))
@@ -1263,7 +1284,7 @@ def build_secondary_starting_estate(
         notes.append("生活費調整は概算控除")
     if context.asset_change_adjustment_amount != 0:
         notes.append("資産変動調整額を反映")
-    
+
     # context.notesが存在する場合のみ追加
     if hasattr(context, 'notes') and context.notes:
         notes.extend(context.notes)
@@ -1271,7 +1292,7 @@ def build_secondary_starting_estate(
     # --- 監査役指摘事項：未定義エラーの修正 ---
     # 相次相続控除（相続税法20条）に関連する計算結果を保持する変数を定義。
     # 現時点で個別の計算ロジックが未定義のため、空の辞書で初期化しエラーを防止。
-    successive_computation = {} 
+    successive_computation = {}
 
     return SecondaryStartingEstateBreakdown(
         spouse_net_assets_after_first_tax=quantize_yen(snapshot.spouse_net_assets_after_first_tax),
@@ -1282,6 +1303,8 @@ def build_secondary_starting_estate(
         notes=notes,
         successive_inheritance_computation=successive_computation,
     )
+
+
 def resolve_secondary_heirs(
     primary_inputs: PrimaryInputs,
     snapshot: PrimaryToSecondarySnapshot,
@@ -1319,7 +1342,6 @@ def resolve_secondary_heirs(
             )
         )
     return resolved
-
 
 
 def calculate_minor_credit_total(
@@ -1484,7 +1506,6 @@ def calculate_successive_inheritance_credit_detail(
     )
 
 
-
 def apply_secondary_tax_credits_in_order(
     snapshot: PrimaryToSecondarySnapshot,
     context: SecondarySimulationContext,
@@ -1539,8 +1560,6 @@ def apply_secondary_tax_credits_in_order(
         final_total_tax=final_total_tax,
         notes=notes,
     )
-
-
 
 
 def resolve_secondary_small_scale_review(
@@ -1666,8 +1685,6 @@ def calculate_secondary_inheritance(
         snapshot=snapshot,
         context=context,
     )
-
-
 
 
 def build_primary_summary_for_snapshot(primary_inputs: PrimaryInputs, primary_result: PrimaryResult) -> dict[str, Any]:
@@ -1906,8 +1923,6 @@ def build_primary_heir_tax_df(result: PrimaryResult) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-
-
 def build_gift_detail_df(result: PrimaryResult) -> pd.DataFrame:
     rows = []
     for record in result.gift_detail_records:
@@ -1924,6 +1939,7 @@ def build_gift_detail_df(result: PrimaryResult) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
 
 def build_snapshot_summary_df(snapshot: PrimaryToSecondarySnapshot, context: SecondarySimulationContext, result: SecondaryResult) -> pd.DataFrame:
     note_lines: list[str] = []
@@ -2017,8 +2033,6 @@ def build_secondary_audit_notes_df(snapshot: PrimaryToSecondarySnapshot, context
     if not rows:
         rows.append(["監査メモ", "低", "重大な追加注記はありません。"])
     return pd.DataFrame(rows, columns=["分類", "優先度", "内容"])
-
-
 
 
 def build_successive_inheritance_credit_df(result: SecondaryResult) -> pd.DataFrame:
@@ -2140,6 +2154,246 @@ def _pdf_safe(value: Any) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br/>")
 
 
+def _pdf_plain_money(value: Any) -> str:
+    """金額を「#,###円」形式の文字列に変換する。"""
+    try:
+        amount = int(Decimal(str(value)).quantize(Decimal("1"), ROUND_HALF_UP))
+    except Exception:
+        try:
+            amount = int(float(value))
+        except Exception:
+            return str(value)
+    return f"{amount:,}円"
+
+
+def _pdf_money_display(value: Any) -> str:
+    """金額を億・万円単位の短縮形式で返す（PDF用）。"""
+    try:
+        amount = int(Decimal(str(value)).quantize(Decimal("1"), ROUND_HALF_UP))
+    except Exception:
+        try:
+            amount = int(float(value))
+        except Exception:
+            return str(value)
+    abs_amount = abs(amount)
+    sign = "△" if amount < 0 else ""
+    if abs_amount >= 100_000_000:
+        return f"{sign}{abs_amount / 100_000_000:.2f}億円"
+    if abs_amount >= 10_000:
+        return f"{sign}{abs_amount / 10_000:.1f}万円"
+    return f"{sign}{abs_amount:,}円"
+
+
+def _pdf_build_highlight_box(
+    label: str,
+    value: str,
+    caption: str,
+    width_mm: float,
+    label_style: Any,
+    value_style: Any,
+    caption_style: Any,
+) -> Table:
+    """PDF用KPIハイライトボックスを生成する。"""
+    box_width = width_mm * mm
+    inner_data = [
+        [Paragraph(_pdf_safe(label), label_style)],
+        [Paragraph(_pdf_safe(value), value_style)],
+        [Paragraph(_pdf_safe(caption), caption_style)],
+    ]
+    inner_table = Table(inner_data, colWidths=[box_width - 6 * mm])
+    inner_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#EDF5FF")),
+                ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#1E5AA8")),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ]
+        )
+    )
+    return inner_table
+
+
+def _pdf_build_ratio_chart(
+    df_sim: pd.DataFrame,
+    current_ratio: int,
+    recommended_ratio: int,
+) -> Table:
+    """配偶者取得割合別の税額比較を棒グラフ（Drawing）として生成する。"""
+    work = _ensure_dataframe(
+        df_sim,
+        ["配分(%)", "一次相続税額", "二次相続税額", "合計納税額"],
+    )
+    if work.empty:
+        placeholder_style = ParagraphStyle(
+            "ChartPlaceholder",
+            fontName="HeiseiKakuGo-W5",
+            fontSize=9,
+            leading=12,
+        )
+        return Table(
+            [[Paragraph("（グラフデータがありません）", placeholder_style)]],
+            colWidths=[170 * mm],
+        )
+
+    work["配分数値"] = work["配分(%)"].apply(_extract_ratio_int)
+    work = work.sort_values("配分数値").reset_index(drop=True)
+    n = len(work)
+
+    chart_width = 170 * mm
+    chart_height = 60 * mm
+    drawing = Drawing(chart_width, chart_height)
+
+    bar_chart = VerticalBarChart()
+    bar_chart.x = 30
+    bar_chart.y = 20
+    bar_chart.width = chart_width - 50
+    bar_chart.height = chart_height - 30
+    bar_chart.data = [
+        [int(v) for v in work["一次相続税額"].tolist()],
+        [int(v) for v in work["二次相続税額"].tolist()],
+        [int(v) for v in work["合計納税額"].tolist()],
+    ]
+    bar_chart.categoryAxis.categoryNames = [
+        f"{int(v)}%" for v in work["配分数値"].tolist()
+    ]
+    bar_chart.bars[0].fillColor = colors.HexColor("#5B9BD5")
+    bar_chart.bars[1].fillColor = colors.HexColor("#A5A5A5")
+    bar_chart.bars[2].fillColor = colors.HexColor("#4472C4")
+    bar_chart.groupSpacing = 5
+    bar_chart.barSpacing = 2
+    bar_chart.valueAxis.forceZero = 1
+    bar_chart.categoryAxis.labels.fontSize = 7
+    bar_chart.valueAxis.labels.fontSize = 7
+
+    drawing.add(bar_chart)
+
+    # 推奨案・現状想定の縦線マーカー
+    bar_total_width = bar_chart.width
+    bar_unit = bar_total_width / max(n, 1)
+    for idx, row in work.iterrows():
+        ratio_val = int(row["配分数値"])
+        x_center = bar_chart.x + bar_unit * (idx + 0.5)
+        if ratio_val == recommended_ratio:
+            line = Line(
+                x_center, bar_chart.y,
+                x_center, bar_chart.y + bar_chart.height,
+                strokeColor=colors.HexColor("#1E5AA8"),
+                strokeWidth=1.5,
+                strokeDashArray=[4, 2],
+            )
+            drawing.add(line)
+            label = String(
+                x_center + 2, bar_chart.y + bar_chart.height - 8,
+                f"★推奨 {ratio_val}%",
+                fontSize=6.5,
+                fillColor=colors.HexColor("#1E5AA8"),
+            )
+            drawing.add(label)
+        elif ratio_val == current_ratio and current_ratio != recommended_ratio:
+            line = Line(
+                x_center, bar_chart.y,
+                x_center, bar_chart.y + bar_chart.height,
+                strokeColor=colors.HexColor("#a61d24"),
+                strokeWidth=1.2,
+                strokeDashArray=[3, 2],
+            )
+            drawing.add(line)
+            label = String(
+                x_center + 2, bar_chart.y + bar_chart.height - 16,
+                f"■現状 {ratio_val}%",
+                fontSize=6.5,
+                fillColor=colors.HexColor("#a61d24"),
+            )
+            drawing.add(label)
+
+    wrapper = Table([[drawing]], colWidths=[chart_width])
+    wrapper.setStyle(TableStyle([("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0)]))
+    return wrapper
+
+
+def _pdf_recommendation_comparison_df(
+    df_sim: pd.DataFrame,
+    current_ratio: int,
+    recommended_ratio: int,
+) -> pd.DataFrame:
+    """PDF用の推奨案比較DataFrameを生成する。"""
+    work = _ensure_dataframe(
+        df_sim,
+        ["配分(%)", "一次相続税額", "二次相続税額", "合計納税額"],
+    )
+    if work.empty:
+        return pd.DataFrame(
+            columns=["区分", "配偶者割合", "一次相続", "二次相続", "合計税額"]
+        )
+    work["配分数値"] = work["配分(%)"].apply(_extract_ratio_int)
+    rows: list[dict[str, Any]] = []
+    for _, row in work.sort_values("合計納税額").head(5).iterrows():
+        ratio = _extract_ratio_int(row["配分(%)"])
+        if ratio == recommended_ratio:
+            label = "推奨案"
+        elif ratio == current_ratio:
+            label = "現状想定"
+        else:
+            label = "比較案"
+        rows.append(
+            {
+                "区分": label,
+                "配偶者割合": f"{ratio}%",
+                "一次相続": _pdf_plain_money(row["一次相続税額"]),
+                "二次相続": _pdf_plain_money(row["二次相続税額"]),
+                "合計税額": _pdf_plain_money(row["合計納税額"]),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _find_ratio_row(
+    df: pd.DataFrame,
+    ratio: int,
+) -> Optional[pd.Series]:
+    """シミュレーションDataFrameから指定割合に最も近い行を返す。"""
+    if df is None or df.empty:
+        return None
+    work = df.copy()
+    if "配分数値" not in work.columns:
+        work["配分数値"] = work["配分(%)"].apply(_extract_ratio_int)
+    exact = work[work["配分数値"] == ratio]
+    if not exact.empty:
+        return exact.iloc[0]
+    nearest = work.iloc[(work["配分数値"] - ratio).abs().argsort()[:1]]
+    return nearest.iloc[0] if not nearest.empty else None
+
+
+def _ppt_rgb(hex_str: str) -> RGBColor:
+    """16進数カラー文字列をRGBColorオブジェクトに変換する。"""
+    clean = hex_str.lstrip("#").upper()
+    if len(clean) == 6:
+        return RGBColor(
+            int(clean[0:2], 16),
+            int(clean[2:4], 16),
+            int(clean[4:6], 16),
+        )
+    return RGBColor(0, 0, 0)
+
+
+def _ppt_set_shape_fill(
+    shape: Any,
+    fill_hex: str,
+    line_hex: Optional[str] = None,
+) -> None:
+    """PowerPointシェイプの塗りつぶし色と枠線色を設定する。"""
+    shape.fill.solid()
+    shape.fill.fore_color.rgb = _ppt_rgb(fill_hex)
+    if line_hex is not None:
+        shape.line.color.rgb = _ppt_rgb(line_hex)
+    else:
+        shape.line.color.rgb = _ppt_rgb(fill_hex)
+
+
 def _trim_df_for_pdf(df: pd.DataFrame, max_rows: int = 12) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame({"項目": ["データなし"]})
@@ -2151,48 +2405,146 @@ def _trim_df_for_pdf(df: pd.DataFrame, max_rows: int = 12) -> pd.DataFrame:
     return trimmed
 
 
-def _build_pdf_table(df: pd.DataFrame, body_style: ParagraphStyle, header_style: ParagraphStyle, col_widths: Optional[list[float]] = None) -> Table:
+def _pdf_text_units(value: Any) -> float:
+    text = _pdf_safe(value).replace("<br/>", " ").replace("&nbsp;", " ")
+    units = 0.0
+    for ch in text:
+        if ch in "\r\n\t":
+            continue
+        units += 1.9 if unicodedata.east_asian_width(ch) in ("W", "F", "A") else 1.0
+    return max(units, 2.0)
+
+
+def _pdf_estimate_col_widths(df: pd.DataFrame, max_width: float, min_col_width: float = 18 * mm) -> list[float]:
+    columns = list(df.columns)
+    if not columns:
+        return [max_width]
+    weights = []
+    for col in columns:
+        header_units = _pdf_text_units(col) * 1.15
+        body_units = max((_pdf_text_units(v) for v in df[col].head(12).tolist()), default=4.0)
+        weights.append(max(header_units, min(body_units, 34.0)))
+    total_weight = sum(weights) or len(weights)
+    widths = [max(min_col_width, max_width * (w / total_weight)) for w in weights]
+    current_total = sum(widths)
+    if current_total > max_width:
+        scale = max_width / current_total
+        widths = [max(min_col_width, w * scale) for w in widths]
+        overflow = sum(widths) - max_width
+        idx = len(widths) - 1
+        while overflow > 0.1 and idx >= 0:
+            reducible = max(0.0, widths[idx] - min_col_width)
+            delta = min(reducible, overflow)
+            widths[idx] -= delta
+            overflow -= delta
+            idx -= 1
+    elif current_total < max_width:
+        widths[-1] += max_width - current_total
+    return widths
+
+
+def _build_pdf_table(
+    df: pd.DataFrame,
+    body_style: ParagraphStyle,
+    header_style: ParagraphStyle,
+    col_widths: Optional[list[float]] = None,
+    max_width: float = 170 * mm,
+    body_font_size: Optional[float] = None,
+    body_leading: Optional[float] = None,
+    cell_padding: tuple[float, float, float, float] = (6, 6, 6, 6),
+) -> Table:
     trimmed = _trim_df_for_pdf(df)
     columns = list(trimmed.columns)
-    data = [[Paragraph(_pdf_safe(col), header_style) for col in columns]]
+    if not columns:
+        trimmed = pd.DataFrame({"項目": ["データなし"]})
+        columns = list(trimmed.columns)
+
+    resolved_widths = list(col_widths) if col_widths else _pdf_estimate_col_widths(trimmed, max_width=max_width)
+    column_count = len(columns)
+    if len(resolved_widths) != column_count:
+        if len(resolved_widths) < column_count:
+            resolved_widths.extend([max_width / max(column_count, 1)] * (column_count - len(resolved_widths)))
+        resolved_widths = resolved_widths[:column_count]
+
+    total_width = sum(resolved_widths) or max_width
+    if total_width > max_width:
+        shrink_ratio = max_width / total_width
+        resolved_widths = [max(14 * mm, width * shrink_ratio) for width in resolved_widths]
+        current_total = sum(resolved_widths)
+        if current_total > max_width:
+            resolved_widths[-1] = max(14 * mm, resolved_widths[-1] - (current_total - max_width))
+    elif total_width < max_width:
+        resolved_widths[-1] += max_width - total_width
+
+    effective_body = ParagraphStyle(
+        f"{body_style.name}_PDFTable_{column_count}",
+        parent=body_style,
+        fontSize=body_font_size if body_font_size is not None else body_style.fontSize,
+        leading=body_leading if body_leading is not None else max(body_style.leading, (body_font_size or body_style.fontSize) + 3),
+        wordWrap="CJK",
+        splitLongWords=True,
+        allowWidows=1,
+        allowOrphans=1,
+    )
+    effective_header = ParagraphStyle(
+        f"{header_style.name}_PDFTable_{column_count}",
+        parent=header_style,
+        wordWrap="CJK",
+        splitLongWords=True,
+        alignment=1,
+        leading=max(header_style.leading, (header_style.fontSize or 8.7) + 2.5),
+    )
+
+    data = [[Paragraph(_pdf_safe(col), effective_header) for col in columns]]
     for _, row in trimmed.iterrows():
-        data.append([Paragraph(_pdf_safe(row[col]), body_style) for col in columns])
-    table = Table(data, repeatRows=1, colWidths=col_widths)
+        data.append([Paragraph(_pdf_safe(row[col]), effective_body) for col in columns])
+
+    table = Table(data, repeatRows=1, colWidths=resolved_widths, hAlign='LEFT')
+    top_pad, bottom_pad, left_pad, right_pad = cell_padding
     table.setStyle(
         TableStyle(
             [
                 ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(f"#{COLOR_NAVY}")),
                 ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                ("FONTNAME", (0, 0), (-1, -1), body_style.fontName),
-                ("FONTSIZE", (0, 0), (-1, -1), 8.5),
-                ("LEADING", (0, 0), (-1, -1), 11),
+                ("FONTNAME", (0, 0), (-1, -1), effective_body.fontName),
+                ("FONTSIZE", (0, 0), (-1, -1), effective_body.fontSize),
+                ("LEADING", (0, 0), (-1, -1), effective_body.leading),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("ALIGN", (0, 0), (-1, 0), "CENTER"),
                 ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#B7C0D0")),
                 ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F7F9FC")]),
-                ("TOPPADDING", (0, 0), (-1, -1), 5),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-                ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                ("TOPPADDING", (0, 0), (-1, -1), top_pad),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), bottom_pad),
+                ("LEFTPADDING", (0, 0), (-1, -1), left_pad),
+                ("RIGHTPADDING", (0, 0), (-1, -1), right_pad),
             ]
         )
     )
     return table
 
 
-def _build_pdf_note_box(text_value: str, body_style: ParagraphStyle) -> Table:
+def _build_pdf_note_box(text_value: str, body_style: ParagraphStyle, box_width: float = 170 * mm) -> Table:
     html_text = text_value.replace("&", "&amp;").replace("<br/>", "[[BR]]")
     html_text = html_text.replace("<", "&lt;").replace(">", "&gt;").replace("[[BR]]", "<br/>")
-    table = Table([[Paragraph(html_text, body_style)]], colWidths=[170 * mm])
+    note_style = ParagraphStyle(
+        f"{body_style.name}_Note",
+        parent=body_style,
+        wordWrap="CJK",
+        splitLongWords=True,
+        leading=max(body_style.leading, body_style.fontSize + 4),
+        allowWidows=1,
+        allowOrphans=1,
+    )
+    table = Table([[Paragraph(html_text, note_style)]], colWidths=[box_width], hAlign='LEFT')
     table.setStyle(
         TableStyle(
             [
                 ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#FFF6DD")),
                 ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor(f"#{COLOR_GOLD}")),
-                ("TOPPADDING", (0, 0), (-1, -1), 8),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-                ("LEFTPADDING", (0, 0), (-1, -1), 9),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 9),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("TOPPADDING", (0, 0), (-1, -1), 9),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
+                ("LEFTPADDING", (0, 0), (-1, -1), 10),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 10),
             ]
         )
     )
@@ -2220,173 +2572,262 @@ def create_pdf_report(
         rightMargin=16 * mm,
         topMargin=14 * mm,
         bottomMargin=14 * mm,
-        title="相続税シミュレーション整理資料",
+        title="相続税シミュレーションご提案レポート",
         author="山根会計",
     )
     sample = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        "TitleJP",
-        parent=sample["Title"],
-        fontName=font_name,
-        fontSize=20,
-        leading=24,
-        textColor=colors.HexColor(f"#{COLOR_NAVY}"),
-        spaceAfter=8,
-    )
-    heading_style = ParagraphStyle(
-        "HeadingJP",
-        parent=sample["Heading2"],
-        fontName=font_name,
-        fontSize=14,
-        leading=18,
-        textColor=colors.HexColor(f"#{COLOR_NAVY}"),
-        spaceBefore=3,
-        spaceAfter=7,
-    )
-    body_style = ParagraphStyle(
-        "BodyJP",
-        parent=sample["BodyText"],
-        fontName=font_name,
-        fontSize=9.3,
-        leading=13,
-        textColor=colors.black,
-        spaceAfter=4,
-    )
-    small_style = ParagraphStyle(
-        "SmallJP",
-        parent=body_style,
-        fontSize=8.2,
-        leading=11,
-        textColor=colors.HexColor("#555555"),
-    )
-    header_style = ParagraphStyle(
-        "HeaderJP",
-        parent=body_style,
-        fontName=font_name,
-        fontSize=8.7,
-        leading=11,
-        textColor=colors.white,
-    )
+    title_style = ParagraphStyle("TitleJP", parent=sample["Title"], fontName=font_name, fontSize=20, leading=24, textColor=colors.HexColor(f"#{COLOR_NAVY}"), spaceAfter=6)
+    heading_style = ParagraphStyle("HeadingJP", parent=sample["Heading2"], fontName=font_name, fontSize=14, leading=18, textColor=colors.HexColor(f"#{COLOR_NAVY}"), spaceBefore=2, spaceAfter=6)
+    body_style = ParagraphStyle("BodyJP", parent=sample["BodyText"], fontName=font_name, fontSize=9.4, leading=13.2, textColor=colors.black, spaceAfter=4)
+    small_style = ParagraphStyle("SmallJP", parent=body_style, fontSize=8.2, leading=11, textColor=colors.HexColor("#666666"))
+    header_style = ParagraphStyle("HeaderJP", parent=body_style, fontName=font_name, fontSize=8.7, leading=11, textColor=colors.white)
+    summary_label_style = ParagraphStyle("SummaryLabel", parent=body_style, fontName=font_name, fontSize=9.5, leading=11, textColor=colors.HexColor(f"#{COLOR_BLUE}"))
+    summary_value_style = ParagraphStyle("SummaryValue", parent=body_style, fontName=font_name, fontSize=18, leading=22, textColor=colors.HexColor(f"#{COLOR_BLUE}"))
+    summary_caption_style = ParagraphStyle("SummaryCaption", parent=small_style, fontName=font_name, fontSize=8.2, leading=10.4, textColor=colors.HexColor("#666666"))
 
-    def section(title: str, summary_text: Optional[str] = None):
-        elems = [Paragraph(title, heading_style)]
+    def section(title: str, summary_text: Optional[str] = None) -> list[Any]:
+        elems: list[Any] = [Paragraph(title, heading_style)]
         if summary_text:
             elems.append(Paragraph(_pdf_safe(summary_text), body_style))
-            elems.append(Spacer(1, 3 * mm))
+            elems.append(Spacer(1, 2.5 * mm))
         return elems
-
-    story: list[Any] = []
-    # Cover
-    story.append(Spacer(1, 20 * mm))
-    story.append(Paragraph("相続税シミュレーション整理資料", title_style))
-    story.append(Paragraph("内部確認用・概算", heading_style))
-    story.append(Spacer(1, 6 * mm))
-    cover_rows = [
-        [Paragraph("作成日", body_style), Paragraph(_pdf_safe(date.today().isoformat()), body_style)],
-        [Paragraph("案件名", body_style), Paragraph(_pdf_safe(getattr(primary_inputs, 'case_name', None) or '案件名未設定'), body_style)],
-        [Paragraph("用途", body_style), Paragraph("社内レビュー・面談準備・提出前確認用", body_style)],
-    ]
-    cover_table = Table(cover_rows, colWidths=[32*mm, 120*mm])
-    cover_table.setStyle(TableStyle([("FONTNAME", (0,0), (-1,-1), font_name), ("BACKGROUND", (0,0), (0,-1), colors.HexColor("#EEF3FB")), ("GRID", (0,0), (-1,-1), 0.35, colors.HexColor("#C4CCDA")), ("VALIGN", (0,0), (-1,-1), "MIDDLE"), ("TOPPADDING", (0,0), (-1,-1), 6), ("BOTTOMPADDING", (0,0), (-1,-1), 6)]))
-    story.append(cover_table)
-    story.append(Spacer(1, 8 * mm))
-    story.append(_build_pdf_note_box(f"{GLOBAL_RISK_NOTICE}<br/>{OUTPUT_RISK_NOTICE}", body_style))
-    story.append(PageBreak())
 
     total_assets_amount = (
         to_d(primary_inputs.v_home) + to_d(primary_inputs.v_biz) + to_d(primary_inputs.v_rent)
         + to_d(primary_inputs.v_build) + to_d(primary_inputs.v_stock) + to_d(primary_inputs.v_cash)
         + to_d(primary_inputs.v_ins) + to_d(primary_inputs.v_others) - to_d(primary_inputs.v_debt) - to_d(primary_inputs.v_funeral)
     )
+    current_ratio = int(getattr(secondary_inputs, "spouse_acquisition_pct", 0) or 0)
+    recommendation = _choose_recommendation_plan(df_sim, current_ratio)
+    recommended_ratio = int(recommendation.get("recommended_ratio", current_ratio) or current_ratio)
+    recommended_total_tax = _to_int_safe(recommendation.get("recommended_total_tax", 0))
+    # recommended_primary_tax / recommended_secondary_tax は
+    # recommendation dict 経由で参照するため、ここでは変数に保持しない
+
+    work_sim = _prepare_simulation_dataframe(df_sim)
+    current_row = _find_ratio_row(work_sim, current_ratio) if not work_sim.empty else None
+    current_total_tax = _to_int_safe(current_row["合計納税額"]) if current_row is not None else recommended_total_tax
+    current_primary_tax = _to_int_safe(current_row["一次相続税額"]) if current_row is not None else _to_int_safe(primary_result.total_final_tax)
+    current_secondary_tax = _to_int_safe(current_row["二次相続税額"]) if current_row is not None else _to_int_safe(secondary_result.total_tax_2)
+    tax_reduction = max(current_total_tax - recommended_total_tax, 0)
+    equal_benchmark = _to_int_safe(recommendation.get("equal_total_tax", 0))
+    equal_reduction = max(equal_benchmark - recommended_total_tax, 0)
+
+    spouse_acquired_amount = secondary_result.snapshot.spouse_acquired_total_amount if secondary_result.snapshot else Decimal("0")
     second_inheritance_date = secondary_result.context.second_inheritance_date if secondary_result.context else date.today()
+    secondary_starting_estate = secondary_result.starting_estate_breakdown.final_secondary_starting_estate if secondary_result.starting_estate_breakdown else Decimal("0")
+
+    risk_lines: list[str] = []
+    if df_audit_notes is not None and not df_audit_notes.empty:
+        level_col = "区分" if "区分" in df_audit_notes.columns else ("分類" if "分類" in df_audit_notes.columns else None)
+        item_col = "項目" if "項目" in df_audit_notes.columns else None
+        desc_col = "内容" if "内容" in df_audit_notes.columns else ("コメント" if "コメント" in df_audit_notes.columns else item_col)
+        for _, row in df_audit_notes.head(6).iterrows():
+            parts = []
+            if level_col:
+                parts.append(str(row.get(level_col, "")).strip())
+            if item_col:
+                parts.append(str(row.get(item_col, "")).strip())
+            if desc_col:
+                parts.append(str(row.get(desc_col, "")).strip())
+            merged = " / ".join([p for p in parts if p and p != "nan"])
+            if merged:
+                risk_lines.append(merged)
+    if not risk_lines:
+        risk_lines = [
+            "自宅や預金の分け方を先に整理しておくと、ご家族の話し合いを進めやすくなります。",
+            "納税資金の確保方法を確認しておくと、不動産売却を急がずに進めやすくなります。",
+            "二次相続まで含めて確認することで、今回の判断による将来差額を把握できます。",
+        ]
+
     assumptions_df = pd.DataFrame(
         [
             {"項目": "相続人構成", "内容": f"配偶者: {'あり' if primary_inputs.has_spouse else 'なし'} / 子等: {primary_inputs.heir_count}人"},
-            {"項目": "総財産額", "内容": fmt_int(total_assets_amount)},
-            {"項目": "二次相続日", "内容": second_inheritance_date.isoformat()},
-            {"項目": "配偶者固有財産", "内容": fmt_int(secondary_inputs.s_own)},
-            {"項目": "二次までの年数", "内容": f"{secondary_inputs.interval_years}年"},
-            {"項目": "注意事項", "内容": "危険論点・概算論点は後続ページ参照"},
+            {"項目": "現状の配偶者取得割合", "内容": f"{current_ratio}%"},
+            {"項目": "推奨する配偶者取得割合", "内容": f"{recommended_ratio}%"},
+            {"項目": "総財産額（概算）", "内容": _pdf_plain_money(total_assets_amount)},
+            {"項目": "二次相続の想定時点", "内容": second_inheritance_date.isoformat()},
+            {"項目": "配偶者固有財産", "内容": _pdf_plain_money(secondary_inputs.s_own)},
         ]
     )
-    story.extend(section("1. 前提条件", "この資料は入力済みの前提条件と再建版コードの計算結果をもとに、自動で再現される内部確認用PDFです。"))
-    story.append(_build_pdf_table(assumptions_df, body_style, header_style, [42*mm, 128*mm]))
-    story.append(PageBreak())
 
-    spouse_acquired_amount = secondary_result.snapshot.spouse_acquired_total_amount if secondary_result.snapshot else Decimal("0")
-    primary_df = pd.DataFrame([
-        {"項目": "一次相続税額（概算）", "内容": fmt_int(primary_result.total_final_tax)},
-        {"項目": "一次相続課税価格", "内容": fmt_int(primary_result.tax_p)},
-        {"項目": "一次相続後純資産", "内容": fmt_int(total_assets_amount - primary_result.total_final_tax)},
-        {"項目": "配偶者取得額", "内容": fmt_int(spouse_acquired_amount) if primary_inputs.has_spouse else "-"},
-    ])
-    story.extend(section("2. 一次相続の概要", "一次相続の全体像を先に確認し、二次相続の起点となる配偶者の取得状況と税負担の位置を把握します。"))
-    story.append(_build_pdf_table(primary_df, body_style, header_style, [56*mm, 114*mm]))
-    story.append(PageBreak())
+    current_analysis_df = pd.DataFrame(
+        [
+            {"項目": "現状想定の総税額", "内容": _pdf_plain_money(current_total_tax), "意味": "一次相続と二次相続を合算した目安です"},
+            {"項目": "今回の相続税額", "内容": _pdf_plain_money(current_primary_tax), "意味": "今回発生する税金の目安です"},
+            {"項目": "将来の相続税額", "内容": _pdf_plain_money(current_secondary_tax), "意味": "配偶者様の将来の相続まで含めた目安です"},
+            {"項目": "配偶者取得額", "内容": _pdf_plain_money(spouse_acquired_amount) if primary_inputs.has_spouse else "-", "意味": "生活資金と二次相続に影響する主要項目です"},
+            {"項目": "二次相続の起点財産", "内容": _pdf_plain_money(secondary_starting_estate), "意味": "配偶者様の税引後残高や固有財産を加味しています"},
+        ]
+    )
 
-    secondary_df = pd.DataFrame([
-        {"項目": "二次起点財産", "内容": fmt_int(secondary_result.starting_estate_breakdown.final_secondary_starting_estate if secondary_result.starting_estate_breakdown else Decimal('0'))},
-        {"項目": "配偶者税引後残高", "内容": fmt_int(secondary_result.net_acq_s)},
-        {"項目": "配偶者固有財産", "内容": fmt_int(secondary_result.s_own)},
-        {"項目": "生活費調整", "内容": fmt_int(secondary_result.s_spend_total)},
-        {"項目": "二次相続税（調整前）", "内容": fmt_int(secondary_result.preliminary_total_tax_2)},
-        {"項目": "二次相続税（調整後）", "内容": fmt_int(secondary_result.total_tax_2)},
-    ])
-    story.extend(section("3. 二次相続の概要", "二次起点財産は配偶者税引後残高・固有財産・生活費調整・資産変動調整から形成されます。"))
-    story.append(_build_pdf_table(secondary_df, body_style, header_style, [56*mm, 114*mm]))
-    story.append(PageBreak())
+    comparison_df = _pdf_recommendation_comparison_df(df_sim, current_ratio, recommended_ratio)
 
-    story.extend(section("4. 一次→二次 接続整理", "再建したsnapshotとcarry forwardをもとに、一次相続のどの値が二次相続へ引き継がれているかを整理します。"))
-    story.append(_build_pdf_table(df_snapshot_summary, body_style, header_style))
+    compare_rows: list[dict[str, str]] = []
+    if not work_sim.empty:
+        work_sim["配分数値"] = work_sim["配分(%)"].apply(_extract_ratio_int)
+        for _, row in work_sim.sort_values("合計納税額").head(5).iterrows():
+            ratio = _extract_ratio_int(row["配分(%)"])
+            label = "推奨案" if ratio == recommended_ratio else ("現状想定" if ratio == current_ratio else "比較案")
+            compare_rows.append(
+                {
+                    "区分": label,
+                    "配偶者割合": f"{ratio}%",
+                    "一次相続": _pdf_plain_money(row["一次相続税額"]),
+                    "二次相続": _pdf_plain_money(row["二次相続税額"]),
+                    "合計税額": _pdf_plain_money(row["合計納税額"]),
+                }
+            )
+    compare_options_df = pd.DataFrame(compare_rows) if compare_rows else comparison_df.copy()
+
+    recommendation_df = pd.DataFrame(
+        [
+            {"項目": "推奨案", "内容": f"配偶者 {recommended_ratio}% 取得案"},
+            {"項目": "推奨理由", "内容": recommendation.get("recommended_reason", "税額とご家族の進めやすさを踏まえた総合案です。")},
+            {"項目": "想定総税額", "内容": _pdf_plain_money(recommended_total_tax)},
+            {"項目": "現状想定との差額", "内容": _pdf_plain_money(tax_reduction)},
+            {"項目": "均等分割に近い案との差額", "内容": _pdf_plain_money(equal_reduction)},
+            {"項目": "納税資金への影響", "内容": "配偶者様の生活資金と納税資金の両立を検討しやすい水準です。"},
+            {"項目": "ご家族への配分上の留意点", "内容": "自宅・預金・保険の分け方をあわせて整理すると、円満な承継につながりやすくなります。"},
+        ]
+    )
+
+    family_merit_df = pd.DataFrame(
+        [
+            {"対象": "配偶者様", "メリット": "生活資金を確保しやすく、住まいの方針も整理しやすくなります。"},
+            {"対象": "お子様", "メリット": "二次相続まで含めた負担差を先に把握でき、ご家族で話し合いやすくなります。"},
+            {"対象": "ご家族全体", "メリット": "税金だけでなく、納税資金・分けやすさ・円満な承継まで含めて整理できます。"},
+        ]
+    )
+
+    next_steps_df = pd.DataFrame(
+        [
+            {"STEP": "1", "内容": "不動産・預金・保険・遺言の資料を確認し、前提条件を固めます。"},
+            {"STEP": "2", "内容": "土地評価や特例適用の可否を含め、正式シミュレーションへ進みます。"},
+            {"STEP": "3", "内容": "ご家族向け説明資料と実行プランを整理し、具体的な対策案を決定します。"},
+        ]
+    )
+
+    note_text = (
+        "本レポートは、現時点でご提示いただいた資料・条件に基づく試算です。正式申告や実行時には、"
+        "土地評価、各種特例の適用可否、遺産分割内容、相続人構成、追加資料の有無等により金額が変動する場合があります。"
+    )
+
+    story: list[Any] = []
+
+    # 1. 総合結論サマリー
+    story.append(Paragraph("相続税シミュレーション ご提案レポート", title_style))
+    story.append(Paragraph(f"現時点では、配偶者 {recommended_ratio}% 取得案が最もご提案しやすい候補です。", heading_style))
+    story.append(Paragraph("税額だけでなく、生活資金、納税資金、ご家族間の分けやすさまで含めて整理しています。", body_style))
+    story.append(Spacer(1, 3 * mm))
+    kpi_table = Table(
+        [[
+            _pdf_build_highlight_box("推奨案", f"配偶者 {recommended_ratio}%", "ご家族に説明しやすい基準案", 52, summary_label_style, summary_value_style, summary_caption_style),
+            _pdf_build_highlight_box("想定総税額", _pdf_money_display(recommended_total_tax), "一次相続 + 二次相続の合計目安", 52, summary_label_style, summary_value_style, summary_caption_style),
+            _pdf_build_highlight_box("現状との差額", _pdf_money_display(tax_reduction), f"現状 {current_ratio}% 想定との比較", 52, summary_label_style, summary_value_style, summary_caption_style),
+        ]],
+        colWidths=[56 * mm, 56 * mm, 56 * mm],
+    )
+    kpi_table.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
+    story.append(kpi_table)
     story.append(Spacer(1, 4 * mm))
-    story.append(_build_pdf_table(df_carryforward, body_style, header_style))
+    summary_points = pd.DataFrame(
+        [
+            {"要点": "結論", "内容": f"現時点では配偶者 {recommended_ratio}% 取得案を推奨します。"},
+            {"要点": "比較結果", "内容": f"現状想定より {tax_reduction:,}円、均等分割に近い案より {equal_reduction:,}円の改善余地があります。"},
+            {"要点": "推奨理由", "内容": recommendation.get("recommended_reason", "税額とご家族の進めやすさを踏まえた総合案です。")},
+            {"要点": "次の一歩", "内容": "正式シミュレーションでは、不動産評価や各種特例を確認し、精度を高めます。"},
+        ]
+    )
+    story.append(_build_pdf_table(summary_points, body_style, header_style, [34 * mm, 136 * mm]))
+    story.append(Spacer(1, 3 * mm))
+    story.append(_build_pdf_note_box(note_text, body_style))
     story.append(PageBreak())
 
-    tax_adj_df = pd.DataFrame([
-        {"項目": "二次相続税（調整前）", "内容": fmt_int(secondary_result.preliminary_total_tax_2)},
-        {"項目": "相次相続控除", "内容": fmt_int(secondary_result.successive_inheritance_credit)},
-        {"項目": "未成年者控除", "内容": fmt_int(secondary_result.minor_credit)},
-        {"項目": "障害者控除", "内容": fmt_int(secondary_result.disability_credit)},
-        {"項目": "二次相続税（調整後）", "内容": fmt_int(secondary_result.total_tax_2)},
-    ])
-    story.extend(section("5. 税額調整明細", "二次相続の調整前税額から、相次相続控除・未成年者控除・障害者控除を差し引く流れを確認します。"))
-    story.append(_build_pdf_table(tax_adj_df, body_style, header_style, [56*mm, 114*mm]))
+    # 2. 現状分析
+    story.extend(section("1. 現状分析", "まずは現状の相続税の見通しと、ご家族の前提条件を整理します。"))
+    story.append(_build_pdf_table(current_analysis_df, body_style, header_style, [42 * mm, 42 * mm, 86 * mm]))
     story.append(Spacer(1, 4 * mm))
-    story.append(_build_pdf_table(df_successive_credit, body_style, header_style))
+    story.append(_build_pdf_table(assumptions_df, body_style, header_style, [50 * mm, 120 * mm]))
     story.append(PageBreak())
 
-    sim_trim = df_sim[["配分(%)", "一次相続税額", "二次相続税額", "合計納税額"]].copy() if not df_sim.empty else pd.DataFrame()
-    story.extend(section("6. 配偶者取得割合比較", "配偶者取得割合を変えたときの一次税・二次税・合計納税額の比較表です。グラフはアプリ画面でも確認できます。"))
-    story.append(_build_pdf_table(sim_trim, body_style, header_style))
-    story.append(PageBreak())
-
-    story.extend(section("7. 小規模宅地等・再判定論点", "小規模宅地等は本体判定ではなく再判定レビューとして整理しています。危険論点を隠さず一覧化します。"))
-    story.append(_build_pdf_table(df_small_scale_review, body_style, header_style))
+    # 3. 課題・留意点
+    story.extend(section("2. 課題・留意点", "相続税額だけでなく、納税資金、家族間配分、将来への備えまで含めて確認します。"))
+    issue_df = pd.DataFrame(
+        [
+            {"観点": "納税資金", "内容": "現金化しやすい資産と納税のタイミングを確認しておくと、実行時の負担が軽くなります。"},
+            {"観点": "ご家族間配分", "内容": "自宅・預金・保険の分け方を整理すると、話し合いが進めやすくなります。"},
+            {"観点": "将来への備え", "内容": "今回だけでなく二次相続まで含めて確認することで、将来差額を把握できます。"},
+        ]
+    )
+    story.append(_build_pdf_table(issue_df, body_style, header_style, [35 * mm, 135 * mm]))
     story.append(Spacer(1, 4 * mm))
-    story.append(_build_pdf_table(df_audit_notes, body_style, header_style))
+    risk_df = pd.DataFrame({"留意点": risk_lines[:5]})
+    story.append(_build_pdf_table(risk_df, body_style, header_style, [170 * mm]))
     story.append(PageBreak())
 
-    conclusion_df = pd.DataFrame([
-        {"項目": "現時点の比較結論", "内容": "一次→二次接続と税額調整の骨格は再建済み。危険論点は要確認のまま明示。"},
-        {"項目": "要確認論点", "内容": "小規模宅地等本体、相次相続控除の更なる厳密化、提出前レビュー"},
-        {"項目": "次アクション", "内容": "社内レビュー実施後、必要に応じてPPT化・提出用調整へ進む"},
-    ])
-    story.extend(section("8. 結論整理", "現時点の資料は内部確認用の標準PDFであり、顧客提出前には税務・表示・数値の再レビューが必要です。"))
-    story.append(_build_pdf_table(conclusion_df, body_style, header_style, [50*mm, 120*mm]))
+    # 4. 対策案比較
+    story.extend(section("3. 対策案比較", "配偶者取得割合を変えた場合の税額差を比較し、現状想定と推奨案の違いを確認します。"))
+    story.append(_build_pdf_table(compare_options_df, body_style, header_style, [24 * mm, 28 * mm, 38 * mm, 38 * mm, 42 * mm]))
+    story.append(Spacer(1, 4 * mm))
+    story.append(Paragraph("配偶者取得割合別 税額比較グラフ", heading_style))
+    story.append(_pdf_build_ratio_chart(df_sim, current_ratio, recommended_ratio))
+    story.append(Spacer(1, 3 * mm))
+    story.append(Paragraph("青の縦線が推奨案、赤の縦線が現状想定です。一次相続と二次相続の合計額だけでなく、その内訳も確認できます。", small_style))
     story.append(PageBreak())
 
-    story.extend(section("9. 免責・注意事項", None))
+    # 5. 最適案の提示
+    story.extend(section("4. 最適案の提示", "ご家族にとって納得しやすく、税額面でも説明しやすい案を現時点の推奨案として整理します。"))
+    story.append(_build_pdf_table(recommendation_df, body_style, header_style, [46 * mm, 124 * mm]))
+    story.append(Spacer(1, 4 * mm))
+    story.append(_build_pdf_table(comparison_df, body_style, header_style, [36 * mm, 28 * mm, 35 * mm, 35 * mm, 36 * mm]))
+    story.append(PageBreak())
+
+    # 6. 今後のアクション
+    story.extend(section("5. 今後のアクション", "次回面談では、正式シミュレーションと実行プランの整理に進むことをおすすめします。"))
+    story.append(_build_pdf_table(family_merit_df, body_style, header_style, [32 * mm, 138 * mm]))
+    story.append(Spacer(1, 4 * mm))
+    story.append(_build_pdf_table(next_steps_df, body_style, header_style, [18 * mm, 152 * mm]))
+    story.append(Spacer(1, 4 * mm))
     story.append(_build_pdf_note_box(
-        "本資料は内部確認用の概算資料です。顧客提出・申告判断・正式提案の前に、税務論点・主数字・表示内容を必ず個別確認してください。<br/>"
-        "二次相続、小規模宅地等、相次相続控除等には未実装または精緻化途上の論点を含みます。",
+        "次回面談では、不動産評価資料、保険契約内容、遺言書の有無、登記内容を確認し、より精度の高いご提案に進めます。",
         body_style,
+    ))
+    story.append(PageBreak())
+
+    # 7. 前提条件・注意事項
+    story.extend(section("6. 前提条件・注意事項", "現行法令等を前提に試算していますが、個別事情により最終結果は変動する場合があります。"))
+    story.append(_build_pdf_table(_trim_df_for_pdf(df_snapshot_summary, 10), body_style, header_style))
+    story.append(Spacer(1, 4 * mm))
+    if df_carryforward is not None and not df_carryforward.empty:
+        story.append(Paragraph("二次相続試算への引継状況", heading_style))
+        story.append(_build_pdf_table(
+            _trim_df_for_pdf(df_carryforward, 8),
+            body_style,
+            header_style,
+            max_width=160 * mm,
+            body_font_size=8.0,
+            body_leading=10.4,
+            cell_padding=(7.0, 7.0, 8.5, 8.5),
+        ))
+        story.append(Spacer(1, 4 * mm))
+    if df_successive_credit is not None and not df_successive_credit.empty:
+        story.append(Paragraph("相次相続控除等の反映状況", heading_style))
+        story.append(_build_pdf_table(_trim_df_for_pdf(df_successive_credit, 8), body_style, header_style))
+        story.append(Spacer(1, 4 * mm))
+    if df_small_scale_review is not None and not df_small_scale_review.empty:
+        story.append(Paragraph("特例適用等の確認事項", heading_style))
+        story.append(_build_pdf_table(_trim_df_for_pdf(df_small_scale_review, 8), body_style, header_style))
+        story.append(Spacer(1, 4 * mm))
+    story.append(_build_pdf_note_box(
+        "本レポートは現時点の試算結果です。正式申告・実行時には、土地評価、各種特例の適用、遺産分割内容、追加資料の有無等に応じて金額が変動する場合があります。最終提案時には個別事情を確認のうえご提案します。",
+        body_style,
+        box_width=166 * mm,
     ))
 
     doc.build(story)
     output.seek(0)
     return output.getvalue()
-
-
 
 
 # =========================================================
@@ -2413,15 +2854,27 @@ def _ppt_money(value: Any) -> str:
 
 
 def _ppt_add_textbox(slide, text: str, left: float, top: float, width: float, height: float, font_size: int = 14, bold: bool = False, color: str = COLOR_NAVY):
-    from pptx.dml.color import RGBColor
     box = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
     tf = box.text_frame
     tf.clear()
+    tf.word_wrap = True
+    tf.auto_size = MSO_AUTO_SIZE.NONE
+    tf.vertical_anchor = MSO_ANCHOR.TOP
+    tf.margin_left = Inches(0.06)
+    tf.margin_right = Inches(0.06)
+    tf.margin_top = Inches(0.03)
+    tf.margin_bottom = Inches(0.03)
     p = tf.paragraphs[0]
     p.text = text
-    p.font.size = Pt(font_size)
-    p.font.bold = bold
-    p.font.color.rgb = RGBColor.from_string(color.upper())
+    p.alignment = PP_ALIGN.LEFT
+    p.space_before = Pt(0)
+    p.space_after = Pt(0)
+    p.line_spacing = 1.08
+    font = p.font
+    font.name = "Meiryo"
+    font.size = Pt(font_size)
+    font.bold = bold
+    font.color.rgb = _ppt_rgb(color)
     return box
 
 
@@ -2434,42 +2887,313 @@ def _ppt_add_note(slide, text: str, left: float, top: float, width: float, heigh
     shape.line.color.rgb = RGBColor.from_string(COLOR_GOLD.upper())
     tf = shape.text_frame
     tf.clear()
+    tf.word_wrap = True
+    tf.auto_size = MSO_AUTO_SIZE.NONE
+    tf.vertical_anchor = MSO_ANCHOR.TOP
+    tf.margin_left = Inches(0.06)
+    tf.margin_right = Inches(0.06)
+    tf.margin_top = Inches(0.03)
+    tf.margin_bottom = Inches(0.03)
     p = tf.paragraphs[0]
     p.text = text
+    p.alignment = PP_ALIGN.LEFT
+    p.space_before = Pt(0)
+    p.space_after = Pt(0)
+    p.line_spacing = 1.05
+    p.font.name = "Meiryo"
     p.font.size = Pt(11)
     p.font.color.rgb = RGBColor.from_string('7A5C00')
     return shape
 
 
 def _ppt_add_table(slide, headers: list[str], rows: list[list[Any]], left: float, top: float, width: float, height: float, font_size: int = 10):
-    from pptx.dml.color import RGBColor
     table = slide.shapes.add_table(len(rows) + 1, len(headers), Inches(left), Inches(top), Inches(width), Inches(height)).table
+
+    def _ppt_text_units_local(value: Any) -> float:
+        text_value = _ppt_safe(value)
+        units = 0.0
+        for ch in text_value:
+            units += 1.9 if unicodedata.east_asian_width(ch) in ("W", "F", "A") else 1.0
+        return max(units, 2.0)
+
+    column_units = []
+    for idx, header in enumerate(headers):
+        body_max = max((_ppt_text_units_local(row[idx]) for row in rows if idx < len(row)), default=2.0)
+        header_units = _ppt_text_units_local(header) * 1.15
+        column_units.append(max(header_units, min(body_max, 26.0)))
+    total_units = sum(column_units) or len(headers)
+    for idx, unit in enumerate(column_units):
+        table.columns[idx].width = Inches(width * (unit / total_units))
+
+    base_row_height = max(0.34, min(0.64, height / max(len(rows) + 1, 1)))
+    table.rows[0].height = Inches(max(base_row_height, 0.42))
+    for ridx, row in enumerate(rows, start=1):
+        line_factor = 1
+        for val in row:
+            line_factor = max(line_factor, _ppt_safe(val).count("\n") + 1)
+        table.rows[ridx].height = Inches(min(max(base_row_height + (line_factor - 1) * 0.08, 0.34), 0.82))
+
     for c, header in enumerate(headers):
         cell = table.cell(0, c)
         cell.text = str(header)
         cell.fill.solid()
-        cell.fill.fore_color.rgb = RGBColor.from_string(COLOR_NAVY.upper())
-        for p in cell.text_frame.paragraphs:
-            p.font.size = Pt(font_size)
-            p.font.bold = True
-            p.font.color.rgb = RGBColor.from_string('FFFFFF')
+        cell.fill.fore_color.rgb = _ppt_rgb(COLOR_NAVY)
+        cell.vertical_anchor = MSO_ANCHOR.MIDDLE
+        tf = cell.text_frame
+        tf.word_wrap = True
+        tf.auto_size = MSO_AUTO_SIZE.NONE
+        tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+        tf.margin_left = Inches(0.05)
+        tf.margin_right = Inches(0.05)
+        tf.margin_top = Inches(0.02)
+        tf.margin_bottom = Inches(0.02)
+        p = tf.paragraphs[0]
+        p.alignment = PP_ALIGN.CENTER
+        p.space_before = Pt(0)
+        p.space_after = Pt(0)
+        p.line_spacing = 1.0
+        font = p.font
+        font.name = "Meiryo"
+        font.size = Pt(font_size)
+        font.bold = True
+        font.color.rgb = _ppt_rgb('FFFFFF')
+
     for r, row in enumerate(rows, start=1):
         for c, val in enumerate(row):
-            table.cell(r, c).text = _ppt_safe(val)
-            for p in table.cell(r, c).text_frame.paragraphs:
-                p.font.size = Pt(font_size)
+            cell = table.cell(r, c)
+            cell.text = _ppt_safe(val)
+            cell.vertical_anchor = MSO_ANCHOR.MIDDLE
+            tf = cell.text_frame
+            tf.word_wrap = True
+            tf.auto_size = MSO_AUTO_SIZE.NONE
+            tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+            tf.margin_left = Inches(0.05)
+            tf.margin_right = Inches(0.05)
+            tf.margin_top = Inches(0.02)
+            tf.margin_bottom = Inches(0.02)
+            p = tf.paragraphs[0]
+            is_number = isinstance(val, Number) or (isinstance(val, str) and bool(re.fullmatch(r"[\d,.%-]+", val.strip())))
+            p.alignment = PP_ALIGN.RIGHT if is_number else PP_ALIGN.LEFT
+            p.space_before = Pt(0)
+            p.space_after = Pt(0)
+            p.line_spacing = 1.0
+            font = p.font
+            font.name = "Meiryo"
+            font.size = Pt(font_size)
+            font.bold = False
+            font.color.rgb = _ppt_rgb(COLOR_TEXT)
     return table
 
 
-def _ppt_pick_rows(df_sim: pd.DataFrame) -> pd.DataFrame:
-    if df_sim is None or df_sim.empty:
-        return pd.DataFrame(columns=['配分(%)', '一次相続税額', '二次相続税額', '合計納税額'])
-    work = df_sim.copy()
-    for col in ['一次相続税額', '二次相続税額', '合計納税額']:
-        work[col] = pd.to_numeric(work[col], errors='coerce').fillna(0)
-    idx_min = work['合計納税額'].idxmin()
-    selected = sorted(set([0, len(work)//2, len(work)-1, idx_min]))
-    return work.iloc[selected][['配分(%)', '一次相続税額', '二次相続税額', '合計納税額']].copy()
+def _ppt_apply_text_style(text_frame, font_size: int = 14, bold: bool = False, color: str = COLOR_DARK) -> None:
+    text_frame.word_wrap = True
+    text_frame.auto_size = MSO_AUTO_SIZE.NONE
+    if text_frame.vertical_anchor is None:
+        text_frame.vertical_anchor = MSO_ANCHOR.TOP
+    text_frame.margin_left = Inches(0.04)
+    text_frame.margin_right = Inches(0.04)
+    text_frame.margin_top = Inches(0.02)
+    text_frame.margin_bottom = Inches(0.02)
+    for paragraph in text_frame.paragraphs:
+        paragraph.alignment = PP_ALIGN.LEFT
+        paragraph.space_before = Pt(0)
+        paragraph.space_after = Pt(0)
+        paragraph.line_spacing = 1.08
+        paragraph.font.name = "Meiryo"
+        paragraph.font.size = Pt(font_size)
+        paragraph.font.bold = bold
+        paragraph.font.color.rgb = _ppt_rgb(color)
+        if not paragraph.runs:
+            paragraph.text = paragraph.text
+        for run in paragraph.runs:
+            run.font.name = "Meiryo"
+            run.font.size = Pt(font_size)
+            run.font.bold = bold
+            run.font.color.rgb = _ppt_rgb(color)
+
+
+def _ppt_add_header_band(slide, title: str, subtitle: Optional[str] = None) -> None:
+    band = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.RECTANGLE, Inches(0), Inches(0), Inches(13.333), Inches(0.75))
+    _ppt_set_shape_fill(band, COLOR_DARK, COLOR_DARK)
+    title_box = slide.shapes.add_textbox(Inches(0.6), Inches(0.12), Inches(8.7), Inches(0.3))
+    tf = title_box.text_frame
+    tf.clear()
+    p = tf.paragraphs[0]
+    p.text = title
+    _ppt_apply_text_style(tf, 24, True, 'FFFFFF')
+    if subtitle:
+        sub_box = slide.shapes.add_textbox(Inches(0.62), Inches(0.42), Inches(10.5), Inches(0.2))
+        stf = sub_box.text_frame
+        stf.clear()
+        sp = stf.paragraphs[0]
+        sp.text = subtitle
+        _ppt_apply_text_style(stf, 10, False, 'D8E4F4')
+
+
+def _ppt_add_card(slide, title: str, body: str, left: float, top: float, width: float, height: float, fill: str = 'FFFFFF', line: str = COLOR_LIGHT_GRAY, title_color: str = COLOR_BLUE, body_color: str = COLOR_DARK) -> None:
+    shape = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, Inches(left), Inches(top), Inches(width), Inches(height))
+    _ppt_set_shape_fill(shape, fill, line)
+    tf = shape.text_frame
+    tf.clear()
+    p1 = tf.paragraphs[0]
+    p1.text = title
+    _ppt_apply_text_style(tf, 16, True, title_color)
+    p2 = tf.add_paragraph()
+    p2.text = body
+    _ppt_apply_text_style(tf, 13, False, body_color)
+
+
+def _ppt_add_kpi_card(slide, title: str, value: str, subtext: str, left: float, top: float, width: float, height: float, accent: str = COLOR_BLUE, fill: str = COLOR_LIGHT_BLUE) -> None:
+    shape = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, Inches(left), Inches(top), Inches(width), Inches(height))
+    _ppt_set_shape_fill(shape, fill, accent)
+    tf = shape.text_frame
+    tf.clear()
+    p1 = tf.paragraphs[0]
+    p1.text = title
+    _ppt_apply_text_style(tf, 12, True, accent)
+    p2 = tf.add_paragraph()
+    p2.text = value
+    _ppt_apply_text_style(tf, 24, True, accent)
+    p3 = tf.add_paragraph()
+    p3.text = subtext
+    _ppt_apply_text_style(tf, 10, False, COLOR_GRAY)
+
+
+def _ppt_add_bullets(slide, title: str, bullets: list[str], left: float, top: float, width: float, height: float, title_color: str = COLOR_BLUE) -> None:
+    box = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
+    tf = box.text_frame
+    tf.clear()
+    p0 = tf.paragraphs[0]
+    p0.text = title
+    _ppt_apply_text_style(tf, 16, True, title_color)
+    for bullet in bullets:
+        p = tf.add_paragraph()
+        p.text = f'• {bullet}'
+        _ppt_apply_text_style(tf, 13, False, COLOR_DARK)
+
+
+def _ppt_find_ratio_row(df_sim: pd.DataFrame, ratio: int) -> Optional[pd.Series]:
+    work = _prepare_simulation_dataframe(df_sim)
+    if work.empty:
+        return None
+    work['配分数値'] = work['配分(%)'].apply(_extract_ratio_int)
+    work = work.sort_values('配分数値').reset_index(drop=True)
+    exact = work[work['配分数値'] == ratio]
+    if not exact.empty:
+        return exact.iloc[0]
+    nearest = work.iloc[(work['配分数値'] - ratio).abs().argsort()[:1]]
+    return nearest.iloc[0] if not nearest.empty else None
+
+
+def _ppt_compact_yen(value: Any) -> str:
+    amount = _to_int_safe(value, 0)
+    abs_amount = abs(amount)
+    sign = '▲' if amount < 0 else ''
+    if abs_amount >= 100000000:
+        return f'{sign}{abs_amount / 100000000:.2f}億円'
+    if abs_amount >= 10000:
+        return f'{sign}{abs_amount / 10000:.1f}万円'
+    return f'{sign}{abs_amount:,}円'
+
+
+def _ppt_build_plan_text(primary_inputs: PrimaryInputs, ratio: int) -> tuple[str, str]:
+    spouse_text = f'配偶者 {ratio}%' if primary_inputs.has_spouse else '配偶者なし'
+    heir_types = [str(h.get('type', '相続人')) for h in primary_inputs.heirs_info]
+    if not heir_types:
+        return spouse_text, '残りはご家族で分ける前提です'
+    unique_types = []
+    for heir_type in heir_types:
+        if heir_type not in unique_types:
+            unique_types.append(heir_type)
+    other_ratio = max(0, 100 - ratio)
+    if len(unique_types) == 1:
+        return spouse_text, f'{unique_types[0]} 合計 {other_ratio}% を分割'
+    return spouse_text, f'その他のご家族 合計 {other_ratio}% を分割'
+
+
+def _ppt_reason_lines(recommendation: dict[str, Any], current_ratio: int) -> list[str]:
+    lines = [
+        '一次相続と二次相続の合計負担が、全体として抑えやすい案です。',
+        '配偶者の生活資金を確保しつつ、お子さま側への将来負担も偏りにくい水準です。',
+    ]
+    diff_vs_equal = _to_int_safe(recommendation.get('diff_vs_equal', 0), 0)
+    if diff_vs_equal < 0:
+        lines.append(f'均等分割に近い案と比べて、合計で {_ppt_compact_yen(abs(diff_vs_equal))} 程度の圧縮余地があります。')
+    elif diff_vs_equal > 0:
+        lines.append(f'均等分割に近い案より税額は {_ppt_compact_yen(diff_vs_equal)} 上がりますが、分けやすさと生活資金を重視した案です。')
+    if abs(recommendation.get('recommended_ratio', current_ratio) - current_ratio) >= 20:
+        lines.append('現在のお考えから差が大きい場合は、自宅・預金・納税資金の順に確認すると進めやすくなります。')
+    return lines[:3]
+
+
+def _ppt_risk_lines(df_audit_notes: Optional[pd.DataFrame], recommendation: dict[str, Any], current_ratio: int) -> list[str]:
+    lines = []
+    if current_ratio != recommendation.get('recommended_ratio', current_ratio):
+        lines.append('現状の配分のままだと、税負担が重いまま固定される可能性があります。')
+    if recommendation.get('recommended_secondary_tax', 0) > recommendation.get('recommended_primary_tax', 0):
+        lines.append('配偶者に寄せすぎると、将来の二次相続で負担が膨らみやすくなります。')
+    lines.append('不動産の分け方が曖昧なままだと、ご家族の話し合いが長引く原因になります。')
+    if df_audit_notes is not None and not df_audit_notes.empty:
+        for _, row in df_audit_notes.head(3).iterrows():
+            content = str(row.iloc[-1]).strip()
+            if content and content not in lines:
+                lines.append(_sanitize_customer_text(content))
+            if len(lines) >= 3:
+                break
+    return lines[:3]
+
+
+def _ppt_add_tax_chart(slide, df_sim: pd.DataFrame, current_ratio: int, recommended_ratio: int, left: float, top: float, width: float, height: float) -> None:
+    work = _prepare_simulation_dataframe(df_sim)
+    if work.empty:
+        _ppt_add_card(slide, '税額比較データ', '比較データが未作成のため、グラフ表示を省略しました。', left, top, width, 1.4)
+        return
+    work['配分数値'] = work['配分(%)'].apply(_extract_ratio_int)
+    work = work.sort_values('配分数値').reset_index(drop=True)
+
+    chart_data = CategoryChartData()
+    chart_data.categories = [f"{int(v)}%" for v in work['配分数値'].tolist()]
+    chart_data.add_series('一次相続', work['一次相続税額'].astype(float).tolist())
+    chart_data.add_series('二次相続', work['二次相続税額'].astype(float).tolist())
+    chart_data.add_series('合計', work['合計納税額'].astype(float).tolist())
+
+    chart = slide.shapes.add_chart(
+        XL_CHART_TYPE.COLUMN_CLUSTERED,
+        Inches(left), Inches(top), Inches(width), Inches(height), chart_data
+    ).chart
+    chart.has_legend = True
+    chart.legend.position = XL_LEGEND_POSITION.BOTTOM
+    chart.value_axis.has_major_gridlines = True
+    chart.category_axis.tick_labels.font.size = Pt(10)
+    chart.value_axis.tick_labels.font.size = Pt(10)
+
+    series_colors = [COLOR_SKY, 'DADFE8', 'C9D3E6']
+    for series, base_color in zip(chart.series, series_colors):
+        series.format.fill.solid()
+        series.format.fill.fore_color.rgb = _ppt_rgb(base_color)
+        series.format.line.color.rgb = _ppt_rgb(base_color)
+
+    total_series = chart.series[2]
+    for idx, point in enumerate(total_series.points):
+        ratio_value = int(work.loc[idx, '配分数値'])
+        point.format.fill.solid()
+        if ratio_value == recommended_ratio:
+            point.format.fill.fore_color.rgb = _ppt_rgb(COLOR_BLUE)
+            point.format.line.color.rgb = _ppt_rgb(COLOR_BLUE)
+        elif ratio_value == current_ratio and current_ratio != recommended_ratio:
+            point.format.fill.fore_color.rgb = _ppt_rgb(COLOR_RED)
+            point.format.line.color.rgb = _ppt_rgb(COLOR_RED)
+        else:
+            point.format.fill.fore_color.rgb = _ppt_rgb('BFC8D6')
+            point.format.line.color.rgb = _ppt_rgb('BFC8D6')
+
+    total_series.has_data_labels = True
+    total_series.data_labels.number_format = '#,##0'
+    total_series.data_labels.position = XL_DATA_LABEL_POSITION.OUTSIDE_END
+    total_series.data_labels.font.size = Pt(9)
+
+    note = f'★推奨: {recommended_ratio}%   ' + (f'■現状想定: {current_ratio}%' if current_ratio != recommended_ratio else '現状想定と推奨案は同一です')
+    _ppt_add_textbox(slide, note, left, top + height + 0.1, width, 0.25, 10, False, COLOR_GRAY)
 
 
 def create_ppt_report(
@@ -2488,167 +3212,124 @@ def create_ppt_report(
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
 
-    # Slide 1: cover
-    slide = prs.slides.add_slide(prs.slide_layouts[6])
-    _ppt_add_textbox(slide, '二次相続シミュレーション分析資料', 0.55, 0.35, 11.8, 0.6, 24, True)
-    _ppt_add_textbox(slide, '一次相続から二次相続までの税負担比較', 0.65, 0.95, 9.0, 0.4, 14, False, '666666')
-    _ppt_add_note(slide, '内部確認用 / 概算を含む資料 / 提出前レビュー必須', 0.7, 1.45, 6.4, 0.8)
-    _ppt_add_textbox(slide, '山根会計', 0.8, 2.6, 3.0, 0.4, 18, True)
-    _ppt_add_textbox(slide, f'作成日: {date.today().isoformat()}', 0.8, 3.1, 3.5, 0.3, 12)
+    current_ratio = _to_int_safe(getattr(secondary_inputs, 'spouse_acquisition_pct', 50), 50)
+    recommendation = _choose_recommendation_plan(df_sim, current_ratio)
+    recommended_ratio = _to_int_safe(recommendation.get('recommended_ratio', current_ratio), current_ratio)
+    current_row = _ppt_find_ratio_row(df_sim, current_ratio)
+    equal_row = _ppt_find_ratio_row(df_sim, 50)
 
-    # Slide 2: assumptions
-    slide = prs.slides.add_slide(prs.slide_layouts[6])
-    _ppt_add_textbox(slide, '本件の前提条件', 0.55, 0.3, 11.8, 0.5, 22, True)
-    heir_lines = [f"法定相続人数: {primary_result.st_count}人", f"配偶者: {'あり' if primary_inputs.has_spouse else 'なし'}"]
-    heir_lines.extend([f"相続人{i+1}: {h['type']}" for i, h in enumerate(primary_inputs.heirs_info[:4])])
-    _ppt_add_textbox(slide, '\n'.join(heir_lines), 0.7, 1.1, 4.3, 2.5, 15)
-    rows = [
-        ['総財産額(概算)', _ppt_money(primary_result.pure_as)],
-        ['債務', _ppt_money(primary_inputs.v_debt)],
-        ['葬式費用', _ppt_money(primary_inputs.v_funeral)],
-        ['生命保険', _ppt_money(primary_inputs.v_ins)],
-        ['固有財産', _ppt_money(secondary_inputs.s_own)],
-        ['二次までの年数', f'{secondary_inputs.interval_years}年'],
-        ['年間生活費', _ppt_money(secondary_inputs.annual_spend)],
-    ]
-    _ppt_add_table(slide, ['項目', '内容'], rows, 5.2, 1.1, 7.2, 3.4, 11)
-    _ppt_add_note(slide, '入力不足がある場合、結果は参考値として扱います。', 0.7, 5.2, 5.0, 0.7)
+    recommended_total_tax = recommendation.get('recommended_total_tax', 0)
+    current_total_tax = _to_int_safe(current_row['合計納税額'], recommended_total_tax) if current_row is not None else recommended_total_tax
+    current_primary_tax = _to_int_safe(current_row['一次相続税額'], 0) if current_row is not None else _to_int_safe(primary_result.total_final_tax, 0)
+    current_secondary_tax = _to_int_safe(current_row['二次相続税額'], 0) if current_row is not None else _to_int_safe(secondary_result.total_tax_2, 0)
+    savings_vs_current = max(0, current_total_tax - _to_int_safe(recommended_total_tax, 0))
+    savings_vs_equal = max(0, _to_int_safe(equal_row['合計納税額'], current_total_tax) - _to_int_safe(recommended_total_tax, 0)) if equal_row is not None else max(0, -_to_int_safe(recommendation.get('diff_vs_equal', 0), 0))
+    primary_secondary_total = _to_int_safe(recommendation.get('recommended_primary_tax', 0), 0) + _to_int_safe(recommendation.get('recommended_secondary_tax', 0), 0)
+    spouse_line, family_line = _ppt_build_plan_text(primary_inputs, recommended_ratio)
+    reason_lines = _ppt_reason_lines(recommendation, current_ratio)
+    risk_lines = _ppt_risk_lines(df_audit_notes, recommendation, current_ratio)
 
-    # Slide 3: primary
     slide = prs.slides.add_slide(prs.slide_layouts[6])
-    _ppt_add_textbox(slide, '一次相続の概要', 0.55, 0.3, 11.8, 0.5, 22, True)
-    _ppt_add_note(slide, f"一次相続税額: {_ppt_money(primary_result.total_final_tax)}", 0.7, 1.1, 3.0, 0.9)
-    _ppt_add_note(slide, f"配偶者取得額: {_ppt_money(primary_result.spouse_actual_taxable_price)}", 4.0, 1.1, 3.0, 0.9)
-    _ppt_add_note(slide, f"一次相続後純資産: {_ppt_money(primary_result.pure_as)}", 7.3, 1.1, 3.0, 0.9)
-    rows = [
-        ['課税価格', _ppt_money(primary_result.tax_p)],
-        ['基礎控除', _ppt_money(primary_result.basic_1)],
-        ['課税遺産総額', _ppt_money(primary_result.taxable_1)],
-    ]
-    _ppt_add_table(slide, ['項目', '内容'], rows, 0.8, 2.5, 5.0, 1.8, 11)
-    _ppt_add_note(slide, '配偶者軽減・生命保険非課税・贈与加算等の影響を含む概算整理です。', 6.1, 2.5, 5.7, 1.0)
+    _ppt_add_header_band(slide, '相続税の負担を抑え、ご家族が話し合いやすい分け方のご提案', '5分で全体像がつかめるよう、結論から先に整理しています。')
+    _ppt_add_textbox(slide, '相続対策シミュレーション ご提案資料', 0.7, 1.2, 7.8, 0.7, 28, True, COLOR_DARK)
+    _ppt_add_textbox(slide, '税金・生活資金・ご家族の納得感をまとめて見える化しました。', 0.72, 1.95, 7.4, 0.35, 14, False, COLOR_GRAY)
+    _ppt_add_kpi_card(slide, '現時点のおすすめ配分', f'{recommended_ratio}%', '配偶者の取得割合', 0.8, 3.0, 2.3, 1.55)
+    _ppt_add_kpi_card(slide, 'おすすめ案の総税額', _ppt_compact_yen(recommended_total_tax), '一次＋二次の合計', 3.35, 3.0, 2.7, 1.55)
+    _ppt_add_kpi_card(slide, '見直し効果', _ppt_compact_yen(max(savings_vs_current, savings_vs_equal)), '現状想定・均等案との比較', 6.3, 3.0, 2.9, 1.55)
+    _ppt_add_card(slide, 'この資料で分かること', '①どの分け方が有力か\n②どれくらい税額差があるか\n③次に確認すべきこと', 9.55, 2.85, 3.0, 2.1, fill='FFFFFF', line=COLOR_LIGHT_GRAY)
+    _ppt_add_textbox(slide, f'作成日: {date.today().isoformat()} / 山根会計', 0.8, 6.65, 3.5, 0.2, 10, False, COLOR_GRAY)
 
-    # Slide 4: secondary
     slide = prs.slides.add_slide(prs.slide_layouts[6])
-    _ppt_add_textbox(slide, '二次相続の概要', 0.55, 0.3, 11.8, 0.5, 22, True)
-    bd = secondary_result.starting_estate_breakdown
-    lines = ['二次起点財産情報なし'] if bd is None else [
-        f'配偶者税引後残余: {_ppt_money(bd.spouse_net_assets_after_first_tax)}',
-        f'固有財産: {_ppt_money(bd.spouse_separate_property_amount)}',
-        f'生活費調整: -{_ppt_money(bd.living_cost_adjustment_amount)}',
-        f'資産変動調整: {_ppt_money(bd.asset_change_adjustment_amount)}',
-        f'二次開始財産: {_ppt_money(bd.final_secondary_starting_estate)}',
-    ]
-    _ppt_add_textbox(slide, '\n'.join(lines), 0.75, 1.1, 5.8, 3.0, 15)
-    _ppt_add_note(slide, f"調整前二次税額: {_ppt_money(secondary_result.preliminary_total_tax_2)}", 7.0, 1.2, 2.4, 0.9)
-    _ppt_add_note(slide, f"調整後二次税額: {_ppt_money(secondary_result.total_tax_2)}", 9.7, 1.2, 2.4, 0.9)
+    _ppt_add_header_band(slide, 'この資料の目的', '相続税の金額だけでなく、家族で進めやすい形まで整理することが目的です。')
+    _ppt_add_card(slide, 'このままだと起こりやすい問題', '税額が高いまま確定する\n自宅や預金の分け方で話し合いが長引く\n配偶者に寄せすぎると二次相続が重くなる', 0.8, 1.2, 5.7, 2.2, fill=COLOR_LIGHT_RED, line=COLOR_RED, title_color=COLOR_RED)
+    _ppt_add_card(slide, '今回の資料で確認するポイント', '税金が抑えやすい配分\n配偶者の生活資金確保\nご家族が納得しやすい進め方', 6.85, 1.2, 5.7, 2.2, fill='FFFFFF', line=COLOR_LIGHT_GRAY)
+    _ppt_add_bullets(slide, '今やる理由', [
+        '元気なうちに決めておくほど、ご家族の選択肢が広がります。',
+        '納税資金や不動産の持ち方を早めに確認すると、慌てずに進められます。',
+        '一度整理しておくと、次回面談で正式な提案に進みやすくなります。',
+    ], 0.9, 4.05, 11.5, 2.1)
 
-    # Slide 5: connection
     slide = prs.slides.add_slide(prs.slide_layouts[6])
-    _ppt_add_textbox(slide, '一次→二次のつながり', 0.55, 0.3, 11.8, 0.5, 22, True)
-    left_lines = []
-    if df_snapshot_summary is not None and not df_snapshot_summary.empty:
-        for _, row in df_snapshot_summary.head(6).iterrows():
-            if len(row) >= 2:
-                left_lines.append(f"{row.iloc[0]}: {row.iloc[1]}")
-    if not left_lines:
-        left_lines = ['接続サマリー情報なし']
-    _ppt_add_textbox(slide, '\n'.join(left_lines), 0.75, 1.1, 6.0, 3.7, 14)
-    cf_rows = []
-    use_cols = [c for c in ['相続人', '続柄', '取得総額', '税引後残高'] if df_carryforward is not None and c in df_carryforward.columns]
-    if use_cols:
+    _ppt_add_header_band(slide, '結論', 'まずは最も伝わる結論からご確認ください。')
+    _ppt_add_textbox(slide, f'おすすめは 配偶者 {recommended_ratio}% 取得案 です', 0.8, 1.1, 8.0, 0.7, 28, True, COLOR_BLUE)
+    _ppt_add_textbox(slide, '税負担・生活資金・将来のバランスを総合的に見て、この案が最も説明しやすい状態です。', 0.82, 1.8, 8.6, 0.35, 13, False, COLOR_GRAY)
+    _ppt_add_kpi_card(slide, '想定総税額', _ppt_compact_yen(recommended_total_tax), '一次相続＋二次相続', 0.8, 2.5, 2.7, 1.55)
+    _ppt_add_kpi_card(slide, '現状想定との差', _ppt_compact_yen(savings_vs_current), f'現状 {current_ratio}% 想定との比較', 3.7, 2.5, 2.8, 1.55, accent=COLOR_BLUE, fill='F5FAFF')
+    _ppt_add_kpi_card(slide, '均等案との差', _ppt_compact_yen(savings_vs_equal), '50%付近との比較', 6.7, 2.5, 2.5, 1.55, accent=COLOR_BLUE, fill='F5FAFF')
+    _ppt_add_card(slide, '推奨理由', '\n'.join(reason_lines[:3]), 9.5, 2.35, 3.0, 2.2, fill='FFFFFF', line=COLOR_LIGHT_GRAY)
+    _ppt_add_card(slide, '次にやること', '不動産・預金・保険契約を確認し、正式シミュレーションへ進みます。', 0.8, 4.65, 11.7, 1.25, fill='FFFFFF', line=COLOR_LIGHT_GRAY, title_color=COLOR_GREEN)
+
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _ppt_add_header_band(slide, '最適分割案', '「誰がどの程度受け取ると、全体の納得感が高いか」を整理しています。')
+    _ppt_add_card(slide, 'おすすめ配分', f'{spouse_line}\n{family_line}', 0.8, 1.2, 4.0, 2.0, fill=COLOR_LIGHT_BLUE, line=COLOR_BLUE)
+    _ppt_add_card(slide, '現状想定との違い', f'現状想定: 配偶者 {current_ratio}%\nおすすめ案: 配偶者 {recommended_ratio}%\n差額: {_ppt_compact_yen(savings_vs_current)} の改善余地', 5.0, 1.2, 3.8, 2.0, fill='FFFFFF', line=COLOR_LIGHT_GRAY)
+    _ppt_add_card(slide, 'ご家族への伝え方', '「税額を下げるため」だけでなく\n「生活資金を守り、将来の負担も抑えるため」\nと説明すると納得されやすくなります。', 9.0, 1.2, 3.4, 2.0, fill='FFFFFF', line=COLOR_LIGHT_GRAY)
+    breakdown_rows = []
+    if df_carryforward is not None and not df_carryforward.empty:
+        use_cols = [c for c in ['相続人', '続柄', '取得総額', '税引後残高'] if c in df_carryforward.columns]
         for _, row in df_carryforward.head(5)[use_cols].iterrows():
-            cf_rows.append([row.get(c, '―') for c in use_cols])
-    _ppt_add_table(slide, use_cols if use_cols else ['項目'], cf_rows if cf_rows else [['carry forward 情報なし']], 6.9, 1.1, 5.1, 3.8, 10)
+            breakdown_rows.append([row.get(c, '―') for c in use_cols])
+    _ppt_add_table(slide, ['相続人', '続柄', '取得総額', '税引後残高'] if breakdown_rows else ['項目', '内容'], breakdown_rows if breakdown_rows else [['配分情報', '取得明細は入力後に自動反映されます']], 0.9, 3.75, 11.7, 2.1, 11)
 
-    # Slide 6: comparison table
     slide = prs.slides.add_slide(prs.slide_layouts[6])
-    _ppt_add_textbox(slide, '配偶者取得割合別 税額比較', 0.55, 0.3, 11.8, 0.5, 22, True)
-    picked = _ppt_pick_rows(df_sim)
-    rows = []
-    min_ratio = '―'
-    diff_text = '―'
-    if not picked.empty:
-        min_row = picked.loc[picked['合計納税額'].idxmin()]
-        min_ratio = str(min_row['配分(%)'])
-        diff_text = f"{int(picked['合計納税額'].max() - picked['合計納税額'].min()):,}円"
-        for _, row in picked.iterrows():
-            rows.append([row['配分(%)'], f"{int(row['一次相続税額']):,}", f"{int(row['二次相続税額']):,}", f"{int(row['合計納税額']):,}"])
-    _ppt_add_note(slide, f'最小税額帯: {min_ratio} / 最大差額: {diff_text}', 0.8, 1.1, 5.6, 0.8)
-    _ppt_add_table(slide, ['配分(%)', '一次税', '二次税', '合計税額'], rows if rows else [['―','―','―','―']], 0.8, 2.1, 11.0, 2.8, 11)
+    _ppt_add_header_band(slide, 'なぜこの案が良いのか', 'ご家族に説明しやすい理由を、3つに絞って整理しています。')
+    _ppt_add_card(slide, '① 一次相続', f'今回の相続税は {_ppt_compact_yen(recommendation.get("recommended_primary_tax", 0))} を目安に整理。\n配偶者の税負担を抑えやすい配分です。', 0.8, 1.3, 3.8, 2.0, fill='FFFFFF', line=COLOR_LIGHT_GRAY)
+    _ppt_add_card(slide, '② 二次相続', f'将来の相続税は {_ppt_compact_yen(recommendation.get("recommended_secondary_tax", 0))} が目安。\n寄せすぎを避けることで、次の相続も重くなりすぎません。', 4.8, 1.3, 3.8, 2.0, fill='FFFFFF', line=COLOR_LIGHT_GRAY)
+    _ppt_add_card(slide, '③ 実務面', '自宅・預金・納税資金を分けて考えやすく、家族会議で説明しやすい案です。', 8.8, 1.3, 3.7, 2.0, fill='FFFFFF', line=COLOR_LIGHT_GRAY)
+    _ppt_add_bullets(slide, '営業・面談で伝えるポイント', [
+        '税額最小だけを追うのではなく、生活資金と分けやすさまで含めて判断しています。',
+        'お子さま側の将来負担も見ているため、長期で見た納得感があります。',
+        recommendation.get('recommended_reason', '総合的に説明しやすい案です。'),
+    ], 0.9, 3.85, 11.5, 2.0)
 
-    # Slide 7: comparison chart substitute
     slide = prs.slides.add_slide(prs.slide_layouts[6])
-    _ppt_add_textbox(slide, '配偶者取得割合別 グラフ比較', 0.55, 0.3, 11.8, 0.5, 22, True)
-    graph_lines = ['横軸: 配偶者取得割合(%)', '縦軸: 税額(円)']
-    if df_sim is not None and not df_sim.empty:
-        work = df_sim.copy()
-        for col in ['一次相続税額', '二次相続税額', '合計納税額']:
-            work[col] = pd.to_numeric(work[col], errors='coerce').fillna(0)
-        idx = work['合計納税額'].idxmin()
-        graph_lines.append(f"最小税額帯: {work.loc[idx, '配分(%)']}")
-        graph_lines.append(f"最小合計税額: {int(work.loc[idx, '合計納税額']):,}円")
-    _ppt_add_textbox(slide, '\n'.join(graph_lines), 0.8, 1.2, 4.5, 2.5, 15)
-    _ppt_add_note(slide, '実画面では Plotly グラフを確認してください。本スライドは説明用の要約です。', 0.8, 4.9, 5.1, 0.8)
-    rows = []
-    if df_sim is not None and not df_sim.empty:
-        for _, row in _ppt_pick_rows(df_sim).iterrows():
-            rows.append([row['配分(%)'], f"{int(row['一次相続税額']):,}", f"{int(row['二次相続税額']):,}", f"{int(row['合計納税額']):,}"])
-    _ppt_add_table(slide, ['配分', '一次税', '二次税', '合計'], rows if rows else [['―','―','―','―']], 5.4, 1.2, 6.2, 3.6, 10)
-
-    # Slide 8: review
-    slide = prs.slides.add_slide(prs.slide_layouts[6])
-    _ppt_add_textbox(slide, '小規模宅地等・要確認論点', 0.55, 0.3, 11.8, 0.5, 22, True)
-    left_rows = []
-    review_cols = [c for c in ['対象宅地', '状態', '再判定アクション'] if df_small_scale_review is not None and c in df_small_scale_review.columns]
-    if review_cols:
-        for _, row in df_small_scale_review.head(5)[review_cols].iterrows():
-            left_rows.append([row.get(c, '―') for c in review_cols])
-    _ppt_add_table(slide, review_cols if review_cols else ['項目'], left_rows if left_rows else [['小宅再判定レビューなし']], 0.7, 1.15, 5.5, 3.9, 10)
-    note_lines = []
-    if df_audit_notes is not None and not df_audit_notes.empty:
-        for _, row in df_audit_notes.head(6).iterrows():
-            note_lines.append(f"{row.iloc[0]}: {row.iloc[1]}")
-    _ppt_add_textbox(slide, '\n'.join(note_lines) if note_lines else '監査メモなし', 6.6, 1.2, 5.2, 4.0, 12)
-
-    # Slide 9: conclusion
-    slide = prs.slides.add_slide(prs.slide_layouts[6])
-    _ppt_add_textbox(slide, '結論整理', 0.55, 0.3, 11.8, 0.5, 22, True)
-    conclusion_lines = []
-    if df_sim is not None and not df_sim.empty:
-        work = df_sim.copy()
-        work['合計納税額'] = pd.to_numeric(work['合計納税額'], errors='coerce').fillna(0)
-        idx = work['合計納税額'].idxmin()
-        conclusion_lines.extend([f"有力配分帯: {work.loc[idx, '配分(%)']}", f"最小合計税額: {int(work.loc[idx, '合計納税額']):,}円"])
-    else:
-        conclusion_lines.append('比較結果データなし')
-    _ppt_add_textbox(slide, '\n'.join(conclusion_lines), 0.8, 1.2, 5.0, 1.8, 16, True)
-    review_points = []
-    if df_audit_notes is not None and not df_audit_notes.empty:
-        for _, row in df_audit_notes.head(4).iterrows():
-            review_points.append(f"要確認: {row.iloc[0]}")
-    _ppt_add_textbox(slide, '\n'.join(review_points) if review_points else '要確認: 提出前レビュー', 0.8, 3.1, 5.3, 2.2, 14)
-    _ppt_add_note(slide, '結論は内部確認用の比較整理です。顧客説明前に数値・論点・表示を再レビューしてください。', 6.4, 1.5, 5.1, 1.3)
-
-    # Slide 10: disclaimer
-    slide = prs.slides.add_slide(prs.slide_layouts[6])
-    _ppt_add_textbox(slide, '免責・注意事項', 0.55, 0.3, 11.8, 0.5, 22, True)
-    disclaimer_lines = [
-        '本資料は内部確認用です。',
-        '概算を含み、税務判断・申告判断には個別確認が必要です。',
-        '小規模宅地等・相次相続控除等には未精緻化または再確認論点があります。',
-        '顧客提出前に数値・表示・論点レビューを必ず実施してください。',
+    _ppt_add_header_band(slide, '一次相続・二次相続の比較', '今回だけでなく、将来まで含めた合計額で判断することが大切です。')
+    _ppt_add_kpi_card(slide, '一次相続の目安', _ppt_compact_yen(recommendation.get('recommended_primary_tax', 0)), '今回かかる税金', 0.9, 1.45, 2.7, 1.5)
+    _ppt_add_kpi_card(slide, '二次相続の目安', _ppt_compact_yen(recommendation.get('recommended_secondary_tax', 0)), '将来かかる税金', 3.85, 1.45, 2.7, 1.5, accent=COLOR_DARK, fill='F4F6F9')
+    _ppt_add_kpi_card(slide, '合計の目安', _ppt_compact_yen(primary_secondary_total), 'ご家族全体でみた税額', 6.8, 1.45, 2.7, 1.5)
+    _ppt_add_card(slide, 'わかりやすい補足', '一次相続 = 今回の相続\n二次相続 = 将来、配偶者様の相続\n両方を合わせて判断することが大切です。', 9.75, 1.28, 2.7, 1.8, fill='FFFFFF', line=COLOR_LIGHT_GRAY)
+    comparison_rows = [
+        ['現状想定', f'{current_ratio}%', _ppt_compact_yen(current_primary_tax), _ppt_compact_yen(current_secondary_tax), _ppt_compact_yen(current_total_tax)],
+        ['おすすめ案', f'{recommended_ratio}%', _ppt_compact_yen(recommendation.get('recommended_primary_tax', 0)), _ppt_compact_yen(recommendation.get('recommended_secondary_tax', 0)), _ppt_compact_yen(recommended_total_tax)],
     ]
-    top = 1.2
-    for line in disclaimer_lines:
-        _ppt_add_note(slide, line, 0.8, top, 10.8, 0.8)
-        top += 1.0
+    _ppt_add_table(slide, ['案', '配偶者割合', '一次相続', '二次相続', '合計'], comparison_rows, 0.9, 3.55, 11.6, 2.1, 11)
+
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _ppt_add_header_band(slide, '税額比較グラフ', '配偶者の取得割合を変えると、税額がどう動くかを一目で確認できます。')
+    _ppt_add_tax_chart(slide, df_sim, current_ratio, recommended_ratio, 0.8, 1.15, 11.8, 4.6)
+    _ppt_add_card(slide, 'グラフの見方', '青の★が推奨案、赤は現状想定です。\n一番下がっている帯だけでなく、その前後も含めてバランスを見ています。', 0.9, 6.0, 11.4, 0.9, fill='FFFFFF', line=COLOR_LIGHT_GRAY, title_color=COLOR_BLUE)
+
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _ppt_add_header_band(slide, '放置した場合の主な注意点', '相続対策は「やるかどうか」より「いつ整理するか」で差が出ます。')
+    _ppt_add_card(slide, '争族の注意点', risk_lines[0] if len(risk_lines) > 0 else '自宅や預金の分け方が曖昧だと、ご家族の話し合いが長引きやすくなります。', 0.8, 1.35, 3.75, 2.0, fill=COLOR_LIGHT_RED, line=COLOR_RED, title_color=COLOR_RED)
+    _ppt_add_card(slide, '納税資金の注意点', risk_lines[1] if len(risk_lines) > 1 else '納税のための現金を確保できないと、不動産の売却を急ぐことがあります。', 4.8, 1.35, 3.75, 2.0, fill='FFF8F8', line='E9B8BB', title_color=COLOR_RED)
+    _ppt_add_card(slide, '二次相続の注意点', risk_lines[2] if len(risk_lines) > 2 else '今回だけを見て決めると、将来の二次相続で税額が増えることがあります。', 8.8, 1.35, 3.75, 2.0, fill='FFF8F8', line='E9B8BB', title_color=COLOR_RED)
+    _ppt_add_bullets(slide, '今のうちに確認しておきたい項目', [
+        '自宅を誰が取得するか',
+        '預金の分け方と納税資金',
+        '保険契約・遺言書・不動産登記の内容',
+    ], 0.9, 4.0, 11.3, 1.8, title_color=COLOR_RED)
+
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _ppt_add_header_band(slide, '今後の進め方', '面談後に何をすればよいかを、3ステップで整理しています。')
+    _ppt_add_card(slide, 'STEP 1', '資料の確認\n不動産・預金・保険・遺言の有無を整理します。', 0.85, 1.8, 3.7, 2.0, fill='FFFFFF', line=COLOR_LIGHT_GRAY, title_color=COLOR_BLUE)
+    _ppt_add_card(slide, 'STEP 2', '正式シミュレーション\n評価資料を反映し、より精度の高い数字に整えます。', 4.8, 1.8, 3.7, 2.0, fill='FFFFFF', line=COLOR_LIGHT_GRAY, title_color=COLOR_BLUE)
+    _ppt_add_card(slide, 'STEP 3', '実行プランの決定\n分割案・遺言・納税資金対策まで具体化します。', 8.75, 1.8, 3.7, 2.0, fill='FFFFFF', line=COLOR_LIGHT_GRAY, title_color=COLOR_BLUE)
+    _ppt_add_card(slide, '次回面談でできること', '① 正式版の税額比較\n② ご家族向け説明資料の作成\n③ 実行時の注意点整理', 0.9, 4.45, 11.5, 1.55, fill=COLOR_LIGHT_BLUE, line=COLOR_BLUE)
+
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _ppt_add_header_band(slide, '個別相談のご案内', '「この人に相談したい」と感じていただけるよう、次の一歩を明確にしています。')
+    _ppt_add_textbox(slide, '次回は、正式シミュレーションと実行プランのご相談をおすすめします。', 0.8, 1.2, 10.8, 0.5, 22, True, COLOR_BLUE)
+    _ppt_add_card(slide, '次回面談で確認すること', 'ご自宅の持ち方\n預金の分け方\n保険・遺言・登記の確認', 0.9, 2.0, 3.9, 2.0, fill='FFFFFF', line=COLOR_LIGHT_GRAY)
+    _ppt_add_card(slide, 'ご相談いただくメリット', '税金だけでなく、ご家族の納得感まで含めて整理できます。\n「今やるべきこと」が明確になります。', 5.0, 2.0, 3.9, 2.0, fill='FFFFFF', line=COLOR_LIGHT_GRAY)
+    _ppt_add_card(slide, 'この資料の位置づけ', '現時点の資料・条件に基づくご提案です。\n正式版では評価資料を確認し、精度をさらに高めます。', 9.1, 2.0, 3.0, 2.0, fill='FFFFFF', line=COLOR_LIGHT_GRAY)
+    _ppt_add_kpi_card(slide, '今回の見直し効果', _ppt_compact_yen(max(savings_vs_current, savings_vs_equal)), '相談の入口として十分な差額です', 0.95, 4.55, 3.2, 1.5)
+    _ppt_add_card(slide, 'ご案内', '資料確認後、正式シミュレーションの面談日程をご相談ください。\n次回はご家族向けの説明資料までご用意できます。', 4.4, 4.45, 8.0, 1.6, fill=COLOR_LIGHT_BLUE, line=COLOR_BLUE, title_color=COLOR_BLUE)
 
     output = BytesIO()
     prs.save(output)
     output.seek(0)
     return output.getvalue()
-
 
 
 def _to_int_safe(value: Any, default: int = 0) -> int:
@@ -2685,6 +3366,40 @@ def _ensure_dataframe(df: Optional[pd.DataFrame], columns: list[str]) -> pd.Data
     return df.copy()
 
 
+def _drop_duplicate_columns_keep_first(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return _ensure_dataframe(df, [])
+    if not df.columns.duplicated().any():
+        return df.copy()
+    return df.loc[:, ~df.columns.duplicated()].copy()
+
+
+def _upsert_column(df: pd.DataFrame, index: int, column_name: str, value: Any) -> pd.DataFrame:
+    work = _ensure_dataframe(df, [])
+    if column_name in work.columns:
+        work[column_name] = value
+        ordered_columns = [col for col in work.columns if col != column_name]
+        safe_index = max(0, min(index, len(ordered_columns)))
+        ordered_columns.insert(safe_index, column_name)
+        return work.loc[:, ordered_columns]
+    safe_index = max(0, min(index, len(work.columns)))
+    work.insert(safe_index, column_name, value)
+    return work
+
+
+def _prepare_simulation_dataframe(df_sim: Optional[pd.DataFrame]) -> pd.DataFrame:
+    work = _ensure_dataframe(df_sim, ['配分(%)', '一次相続税額', '二次相続税額', '合計納税額'])
+    required_columns = ['配分(%)', '一次相続税額', '二次相続税額', '合計納税額']
+    for column_name in required_columns:
+        if column_name not in work.columns:
+            work[column_name] = 0
+    work['配分(%)'] = work['配分(%)'].apply(_extract_ratio_int)
+    for col in ['一次相続税額', '二次相続税額', '合計納税額']:
+        work[col] = pd.to_numeric(work[col], errors='coerce').fillna(0)
+    work['配分表示'] = work['配分(%)'].apply(lambda v: f"{_extract_ratio_int(v)}%")
+    return work
+
+
 def _normalize_customer_sheet_name(name: str) -> str:
     replacements = {
         "内部確認": "ご提案用",
@@ -2702,15 +3417,11 @@ def _normalize_customer_sheet_name(name: str) -> str:
 
 
 def _sanitize_customer_text(value: Any) -> Any:
-    """顧客向けテキストの自動クレンジング"""
     if value is None:
         return ""
     if isinstance(value, (int, float, Decimal)):
         return value
-    if pd.isna(value):  # ✅ NaN値の明示的チェック
-        return ""
-    
-    text_value = str(value).strip()
+    text_value = str(value)
     replacements = {
         "内部確認用": "ご提案資料用",
         "内部確認": "ご提案用",
@@ -2733,16 +3444,20 @@ def _customerize_dataframe(df: Optional[pd.DataFrame], column_map: dict[str, str
     if column_map:
         rename_targets = {col: column_map.get(col, col) for col in work.columns}
         work = work.rename(columns=rename_targets)
+        work = _drop_duplicate_columns_keep_first(work)
     if drop_columns:
         keep_cols = [col for col in work.columns if col not in drop_columns]
         work = work[keep_cols]
-    # ✅ applymap → map に変更（Pandas 2.1.0以降対応）
-    work = work.map(_sanitize_customer_text)
+    map_method = getattr(work, "map", None)
+    if callable(map_method):
+        work = map_method(_sanitize_customer_text)
+    else:
+        work = work.apply(lambda col: col.map(_sanitize_customer_text))
     return work
 
 
 def _choose_recommendation_plan(df_sim: pd.DataFrame, current_ratio: int) -> dict[str, Any]:
-    work = df_sim.copy()
+    work = _prepare_simulation_dataframe(df_sim)
     if work.empty:
         return {
             "recommended_ratio": current_ratio,
@@ -2761,9 +3476,6 @@ def _choose_recommendation_plan(df_sim: pd.DataFrame, current_ratio: int) -> dic
         }
 
     work["配分数値"] = work["配分(%)"].apply(_extract_ratio_int)
-    for col in ["一次相続税額", "二次相続税額", "合計納税額"]:
-        work[col] = pd.to_numeric(work[col], errors="coerce").fillna(0)
-
     work = work.sort_values("配分数値").reset_index(drop=True)
     min_idx = int(work["合計納税額"].idxmin())
     min_row = work.loc[min_idx]
@@ -2895,17 +3607,16 @@ def _build_summary_sheet_df(
 
 
 def _build_comparison_sheet_df(df_sim: pd.DataFrame, secondary_inputs: SecondaryInputs) -> pd.DataFrame:
-    work = df_sim.copy()
+    work = _prepare_simulation_dataframe(df_sim)
     if work.empty:
         return pd.DataFrame(columns=["配偶者取得割合", "一次相続税額", "二次相続税額", "合計税額", "比較コメント", "位置づけ"])
-    work["配偶者取得割合"] = work["配分(%)"]
-    for col in ["一次相続税額", "二次相続税額", "合計納税額"]:
-        work[col] = pd.to_numeric(work[col], errors="coerce").fillna(0)
+    work["配偶者取得割合"] = work["配分表示"]
+    work["配分数値"] = work["配分(%)"].apply(_extract_ratio_int)
     min_total = int(work["合計納税額"].min()) if not work.empty else 0
-    equal_row = work.iloc[(work["配分(%)"].apply(_extract_ratio_int) - 50).abs().argsort()[:1]].iloc[0] if not work.empty else None
+    equal_row = work.iloc[(work["配分数値"] - 50).abs().argsort()[:1]].iloc[0] if not work.empty else None
 
     rows: list[dict[str, Any]] = []
-    for _, row in work.sort_values(by="配偶者取得割合", key=lambda s: s.astype(str).str.replace("%", "", regex=False).astype(int)).iterrows():
+    for _, row in work.sort_values(by="配分数値").iterrows():
         total = _to_int_safe(row["合計納税額"])
         ratio = _extract_ratio_int(row["配分(%)"])
         if total == min_total:
@@ -2948,10 +3659,6 @@ def _build_primary_overview_sheet_df(df1: pd.DataFrame, df_heirs: pd.DataFrame, 
             "内容": "内容",
         },
     )
-    # ✅ 区分列が既に存在するか確認してから挿入
-    if "区分" not in primary_overview.columns:
-        primary_overview.insert(0, "区分", "一次相続の概要")
-
     heir_sheet = _customerize_dataframe(
         df_heirs,
         {
@@ -2968,8 +3675,10 @@ def _build_primary_overview_sheet_df(df1: pd.DataFrame, df_heirs: pd.DataFrame, 
             "注記": "内容",
         },
     )
-    if "区分" not in heir_sheet.columns:
-        heir_sheet.insert(0, "区分", "相続人別整理")
+    if not heir_sheet.empty:
+        heir_sheet = _upsert_column(heir_sheet, 0, "区分", "相続人別整理")
+    if not primary_overview.empty:
+        primary_overview = _upsert_column(primary_overview, 0, "区分", "一次相続の概要")
 
     small_sheet = _customerize_dataframe(
         df_small,
@@ -2984,8 +3693,8 @@ def _build_primary_overview_sheet_df(df1: pd.DataFrame, df_heirs: pd.DataFrame, 
             "注記": "内容",
         },
     )
-    if "区分" not in small_sheet.columns:
-        small_sheet.insert(0, "区分", "小規模宅地等の特例 判定結果")
+    if not small_sheet.empty:
+        small_sheet = _upsert_column(small_sheet, 0, "区分", "小規模宅地等の特例 判定結果")
 
     gifts_sheet = _customerize_dataframe(
         df_gifts,
@@ -3000,13 +3709,14 @@ def _build_primary_overview_sheet_df(df1: pd.DataFrame, df_heirs: pd.DataFrame, 
         },
         drop_columns=["年分"],
     )
-    if "区分" not in gifts_sheet.columns:
-        gifts_sheet.insert(0, "区分", "贈与・保険等の確認事項")
+    if not gifts_sheet.empty:
+        gifts_sheet = _upsert_column(gifts_sheet, 0, "区分", "贈与・保険等の確認事項")
 
     sections = [df for df in [primary_overview, heir_sheet, small_sheet, gifts_sheet] if df is not None and not df.empty]
     if not sections:
         return pd.DataFrame(columns=["区分", "項目", "内容"])
     return pd.concat(sections, ignore_index=True, sort=False)
+
 
 def _build_secondary_overview_sheet_df(df2: pd.DataFrame, df_carryforward: pd.DataFrame, df_successive_credit: pd.DataFrame) -> pd.DataFrame:
     secondary_overview = _customerize_dataframe(
@@ -3018,9 +3728,8 @@ def _build_secondary_overview_sheet_df(df2: pd.DataFrame, df_carryforward: pd.Da
             "備考": "内容",
         },
     )
-    # ✅ 区分列が既に存在するか確認してから挿入
-    if "区分" not in secondary_overview.columns:
-        secondary_overview.insert(0, "区分", "二次相続の概要")
+    if not secondary_overview.empty:
+        secondary_overview = _upsert_column(secondary_overview, 0, "区分", "二次相続の概要")
 
     carryforward_sheet = _customerize_dataframe(
         df_carryforward,
@@ -3040,8 +3749,8 @@ def _build_secondary_overview_sheet_df(df2: pd.DataFrame, df_carryforward: pd.Da
             "注記": "内容",
         },
     )
-    if "区分" not in carryforward_sheet.columns:
-        carryforward_sheet.insert(0, "区分", "二次相続試算用の引継財産")
+    if not carryforward_sheet.empty:
+        carryforward_sheet = _upsert_column(carryforward_sheet, 0, "区分", "二次相続試算用の引継財産")
 
     credit_sheet = _customerize_dataframe(
         df_successive_credit,
@@ -3054,13 +3763,14 @@ def _build_secondary_overview_sheet_df(df2: pd.DataFrame, df_carryforward: pd.Da
             "備考": "計算前提",
         },
     )
-    if "区分" not in credit_sheet.columns:
-        credit_sheet.insert(0, "区分", "相次相続控除の整理")
+    if not credit_sheet.empty:
+        credit_sheet = _upsert_column(credit_sheet, 0, "区分", "相次相続控除の整理")
 
     sections = [df for df in [secondary_overview, carryforward_sheet, credit_sheet] if df is not None and not df.empty]
     if not sections:
         return pd.DataFrame(columns=["区分", "項目", "内容"])
     return pd.concat(sections, ignore_index=True, sort=False)
+
 
 def _build_confirmation_sheet_df(df_audit_notes: pd.DataFrame, df_small_scale_review: pd.DataFrame) -> pd.DataFrame:
     notes_sheet = _customerize_dataframe(
@@ -3072,8 +3782,7 @@ def _build_confirmation_sheet_df(df_audit_notes: pd.DataFrame, df_small_scale_re
         },
     )
     if not notes_sheet.empty:
-        # ✅ 既存の「区分」列の値を標準化
-        notes_sheet["区分"] = notes_sheet["区分"].fillna("").astype(str).str.replace(
+        notes_sheet["区分"] = notes_sheet["区分"].replace(
             {
                 "再判定事項": "今後の確認事項",
                 "未充足事項": "今後の確認事項",
@@ -3082,8 +3791,7 @@ def _build_confirmation_sheet_df(df_audit_notes: pd.DataFrame, df_small_scale_re
                 "税額調整メモ": "今後の確認事項",
                 "小宅再判定事項": "今後の確認事項",
                 "小宅再判定メモ": "今後の確認事項",
-            },
-            regex=False,
+            }
         )
 
     review_sheet = _customerize_dataframe(
@@ -3097,21 +3805,18 @@ def _build_confirmation_sheet_df(df_audit_notes: pd.DataFrame, df_small_scale_re
             "注記": "補足",
         },
     )
-    if not review_sheet.empty and "区分" not in review_sheet.columns:
-        review_sheet.insert(0, "区分", "小規模宅地等の特例に関する確認事項")
-        review_sheet.insert(1, "優先度", "高")
+    if not review_sheet.empty:
+        review_sheet = _upsert_column(review_sheet, 0, "区分", "小規模宅地等の特例に関する確認事項")
+        review_sheet = _upsert_column(review_sheet, 1, "優先度", "高")
 
     if notes_sheet.empty and review_sheet.empty:
         notes_sheet = pd.DataFrame(
             [["今後の確認事項", "中", "現時点では追加の重大論点はありません。分割方針と資料確認を進める想定です。"]],
             columns=["区分", "優先度", "今後の確認事項"],
         )
-    
     sections = [df for df in [notes_sheet, review_sheet] if df is not None and not df.empty]
-    if not sections:
-        return pd.DataFrame(columns=["区分", "優先度", "今後の確認事項"])
-    
     return pd.concat(sections, ignore_index=True, sort=False)
+
 
 def _build_assumptions_sheet_df(primary_inputs: PrimaryInputs, secondary_inputs: SecondaryInputs, primary_result: PrimaryResult, secondary_result: SecondaryResult) -> pd.DataFrame:
     heir_summary = []
@@ -3156,7 +3861,6 @@ def _write_dataframe_to_sheet(
     styles: dict[str, Any],
 ) -> int:
     max_col = max(2, len(df.columns) if not df.empty else 2)
-    end_col_letter = get_column_letter(max_col)
 
     ws.merge_cells(start_row=start_row, start_column=1, end_row=start_row, end_column=max_col)
     title_cell = ws.cell(row=start_row, column=1, value=title)
@@ -3229,77 +3933,209 @@ def _apply_sheet_layout(ws, title: str, subtitle: str, orientation: str, fit_wid
     ws.row_dimensions[3].height = 30
 
 
+def _excel_char_width_units(value: Any) -> float:
+    if value is None:
+        return 0.0
+    text_value = str(value).replace("\r", "\n")
+    widest_line = 0.0
+    for line in text_value.split("\n"):
+        line_units = 0.0
+        for ch in line:
+            if ch == "\t":
+                line_units += 4.0
+            elif unicodedata.east_asian_width(ch) in ("W", "F", "A"):
+                line_units += 1.9
+            else:
+                line_units += 1.0
+        widest_line = max(widest_line, line_units)
+    return widest_line
+
+
+def _excel_is_numeric_header(header_value: Any, numeric_keywords: list[str]) -> bool:
+    if header_value is None:
+        return False
+    header_text = str(header_value)
+    return any(keyword in header_text for keyword in numeric_keywords)
+
+
+def _excel_estimate_wrapped_lines(value: Any, column_width: float, is_numeric: bool) -> int:
+    if value is None:
+        return 1
+    text_value = str(value).replace("\r", "\n")
+    if not text_value:
+        return 1
+    if is_numeric:
+        return max(1, text_value.count("\n") + 1)
+    usable_width = max(column_width - 2.2, 6.0)
+    total_lines = 0
+    for line in text_value.split("\n"):
+        units = _excel_char_width_units(line)
+        total_lines += max(1, int(math.ceil(units / usable_width)))
+    return max(total_lines, 1)
+
+
 def _autosize_and_format_sheet(ws, numeric_keywords: Optional[list[str]] = None) -> None:
-    numeric_keywords = numeric_keywords or ["税額", "金額", "額", "残高", "財産", "控除", "減額", "差額", "取得総額", "取得額"]
-    widths: dict[int, int] = {}
+    numeric_keywords = numeric_keywords or ["税額", "金額", "額", "残高", "財産", "控除", "減額", "差額", "取得総額", "取得額", "割合", "%"]
+    column_meta: dict[int, dict[str, Any]] = {}
+    header_candidates: dict[int, str] = {}
+    merged_cells = {coord for merged in ws.merged_cells.ranges for coord in merged.cells}
+
     for row in ws.iter_rows():
+        if not row:
+            continue
         for cell in row:
-            cell.font = Font(name="Meiryo", size=10, bold=cell.font.bold, italic=cell.font.italic, color=cell.font.color.rgb if cell.font.color and cell.font.color.type == "rgb" else None)
+            if cell.coordinate in merged_cells and cell.coordinate != cell.merged_cells.start_cell.coordinate:
+                continue
+            value = cell.value
+            base_font = cell.font or Font()
+            cell.font = Font(
+                name="Meiryo",
+                size=base_font.sz or 10,
+                bold=base_font.bold,
+                italic=base_font.italic,
+                color=(base_font.color.rgb if base_font.color and base_font.color.type == "rgb" else None),
+            )
+            if value is None:
+                continue
+
+            text_value = str(value)
+            if 1 <= cell.row <= 10 and cell.column not in header_candidates and text_value.strip():
+                header_candidates[cell.column] = text_value
+
+            meta = column_meta.setdefault(cell.column, {"max_width": 0.0, "is_numeric": False, "max_numeric_width": 0.0, "max_text_width": 0.0})
+            header_text = header_candidates.get(cell.column, "")
+            width_units = _excel_char_width_units(value)
+            is_numeric_column = isinstance(value, Number) or _excel_is_numeric_header(header_text, numeric_keywords)
+            if is_numeric_column:
+                meta["is_numeric"] = True
+                meta["max_numeric_width"] = max(meta["max_numeric_width"], width_units)
+                meta["max_width"] = max(meta["max_width"], min(max(width_units + 2.0, 10.5), 18.5))
+                if isinstance(value, Number):
+                    cell.number_format = '#,##0'
+                cell.alignment = Alignment(horizontal="right", vertical="center", wrap_text=False)
+            else:
+                meta["max_text_width"] = max(meta["max_text_width"], width_units)
+                meta["max_width"] = max(meta["max_width"], min(max(width_units + 2.8, 13.0), 42.0))
+                cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+            if cell.row <= 3:
+                cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+    resolved_widths: dict[int, float] = {}
+    for col_idx, meta in column_meta.items():
+        width = meta["max_width"]
+        if meta["is_numeric"] and meta["max_text_width"] <= 4.0:
+            width = min(max(width, 11.0), 18.0)
+        else:
+            width = min(max(width, 14.0), 42.0)
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+        resolved_widths[col_idx] = width
+
+    for row in ws.iter_rows():
+        if not row:
+            continue
+        row_idx = row[0].row
+        max_required_lines = 1
+        has_wrapped_text = False
+        for cell in row:
+            if cell.coordinate in merged_cells and cell.coordinate != cell.merged_cells.start_cell.coordinate:
+                continue
             value = cell.value
             if value is None:
                 continue
-            text_value = str(value)
-            widths[cell.column] = max(widths.get(cell.column, 0), len(text_value.encode("utf-8")) // 2 + 2)
-            if cell.row >= 4 and any(keyword in str(ws.cell(row=4, column=cell.column).value or "") for keyword in numeric_keywords):
-                if isinstance(value, Number):
-                    cell.number_format = '#,##0'
-                    cell.alignment = Alignment(horizontal="right", vertical="center", wrap_text=False)
-            if cell.row >= 4 and not isinstance(value, Number):
+            meta = column_meta.get(cell.column, {"is_numeric": False})
+            col_width = resolved_widths.get(cell.column, ws.column_dimensions[get_column_letter(cell.column)].width or 12.0)
+            line_count = _excel_estimate_wrapped_lines(value, col_width, bool(meta.get("is_numeric")))
+            max_required_lines = max(max_required_lines, line_count)
+            has_wrapped_text = has_wrapped_text or line_count > 1
+            if meta.get("is_numeric"):
+                cell.alignment = Alignment(horizontal="right", vertical="center", wrap_text=False)
+            else:
                 cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
-    for col_idx, width in widths.items():
-        ws.column_dimensions[get_column_letter(col_idx)].width = min(max(width, 12), 36)
-    for row_idx in range(4, ws.max_row + 1):
-        ws.row_dimensions[row_idx].height = max(ws.row_dimensions[row_idx].height or 18, 20)
+            if row_idx <= 3:
+                cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+        if row_idx <= 3:
+            current_height = ws.row_dimensions[row_idx].height or 0
+            default_height = 18.0 if row_idx == 1 else (20.0 if row_idx == 2 else 30.0)
+            ws.row_dimensions[row_idx].height = max(current_height, default_height)
+        else:
+            base_height = 18.0
+            if has_wrapped_text:
+                base_height += (max_required_lines - 1) * 12.8
+            ws.row_dimensions[row_idx].height = max(ws.row_dimensions[row_idx].height or 0, min(base_height, 96.0))
 
 
 def _insert_comparison_chart(ws, df_comp: pd.DataFrame, recommended_ratio: int) -> None:
-    if df_comp.empty:
+    if df_comp is None or df_comp.empty:
         return
+
+    chart_source_col_start = 10  # J
+    chart_source_headers = ["配偶者取得割合", "一次相続税額", "二次相続税額", "合計税額"]
+    safe_df = df_comp.copy()
+
+    for required_col in chart_source_headers:
+        if required_col not in safe_df.columns:
+            return
+
+    safe_df["配偶者取得割合"] = safe_df["配偶者取得割合"].apply(_extract_ratio_int)
+    safe_df["一次相続税額"] = safe_df["一次相続税額"].apply(lambda v: _to_int_safe(v, 0))
+    safe_df["二次相続税額"] = safe_df["二次相続税額"].apply(lambda v: _to_int_safe(v, 0))
+    safe_df["合計税額"] = safe_df["合計税額"].apply(lambda v: _to_int_safe(v, 0))
+    safe_df = safe_df.dropna(subset=["配偶者取得割合"]).sort_values("配偶者取得割合").reset_index(drop=True)
+
+    if safe_df.empty:
+        return
+
     chart_start_row = 5
     data_start_row = chart_start_row + 18
-    chart_df = df_comp.copy()
-    chart_df["推奨案マーク"] = chart_df.apply(
-        lambda row: row["合計税額"] if _extract_ratio_int(row["配偶者取得割合"]) == recommended_ratio else None,
-        axis=1,
-    )
-    for col_idx, col_name in enumerate(chart_df.columns, start=1):
-        ws.cell(row=data_start_row, column=col_idx, value=col_name)
-    for row_offset, values in enumerate(chart_df.values.tolist(), start=1):
-        for col_idx, value in enumerate(values, start=1):
-            ws.cell(row=data_start_row + row_offset, column=col_idx, value=value)
 
-    bar = BarChart()
-    bar.type = "col"
-    bar.style = 10
-    bar.overlap = 0
-    bar.y_axis.title = "税額（円）"
-    bar.x_axis.title = "配偶者取得割合"
-    bar.height = 8.5
-    bar.width = 15.5
-    data = Reference(ws, min_col=2, max_col=4, min_row=data_start_row, max_row=data_start_row + len(chart_df))
-    cats = Reference(ws, min_col=1, min_row=data_start_row + 1, max_row=data_start_row + len(chart_df))
-    bar.add_data(data, titles_from_data=True)
-    bar.set_categories(cats)
+    for offset, header in enumerate(chart_source_headers):
+        target_cell = ws.cell(row=data_start_row, column=chart_source_col_start + offset, value=header)
+        target_cell.font = Font(name="Meiryo", size=9, bold=True)
 
-    line = LineChart()
-    line.height = 8.5
-    line.width = 15.5
-    line.y_axis.axId = 200
-    line.y_axis.title = "推奨案"
-    line_data = Reference(ws, min_col=6, max_col=6, min_row=data_start_row, max_row=data_start_row + len(chart_df))
-    line.add_data(line_data, titles_from_data=True)
-    line.set_categories(cats)
-    if line.series:
-        line.series[0].graphicalProperties.line.noFill = True
-        line.series[0].marker.symbol = "diamond"
-        line.series[0].marker.size = 12
+    for row_offset, (_, row) in enumerate(safe_df.iterrows(), start=1):
+        ws.cell(row=data_start_row + row_offset, column=chart_source_col_start + 0, value=int(row["配偶者取得割合"]))
+        ws.cell(row=data_start_row + row_offset, column=chart_source_col_start + 1, value=int(row["一次相続税額"]))
+        ws.cell(row=data_start_row + row_offset, column=chart_source_col_start + 2, value=int(row["二次相続税額"]))
+        ws.cell(row=data_start_row + row_offset, column=chart_source_col_start + 3, value=int(row["合計税額"]))
 
-    bar += line
-    ws.add_chart(bar, "A5")
-    for row in range(data_start_row, data_start_row + len(chart_df) + 2):
+    data_end_row = data_start_row + len(safe_df)
+    if data_end_row <= data_start_row:
+        return
+
+    chart = BarChart()
+    chart.type = "col"
+    chart.style = 10
+    chart.overlap = 0
+    chart.grouping = "clustered"
+    chart.title = "配偶者取得割合ごとの税額比較"
+    chart.y_axis.title = "税額（円）"
+    chart.x_axis.title = "配偶者取得割合"
+    chart.height = 8.5
+    chart.width = 15.5
+    chart.legend.position = "b"
+    chart.varyColors = False
+    chart.gapWidth = 80
+
+    cats = Reference(ws, min_col=chart_source_col_start, min_row=data_start_row + 1, max_row=data_end_row)
+    for series_col in range(chart_source_col_start + 1, chart_source_col_start + 4):
+        values = Reference(ws, min_col=series_col, min_row=data_start_row, max_row=data_end_row)
+        chart.add_data(values, titles_from_data=True)
+    chart.set_categories(cats)
+
+    series_palette = ["5B9BD5", "A5A5A5", "4472C4"]
+    for idx, series in enumerate(chart.series):
+        fill_color = series_palette[idx % len(series_palette)]
+        series.graphicalProperties.solidFill = fill_color
+        series.graphicalProperties.line.solidFill = fill_color
+
+    ws.add_chart(chart, "A5")
+
+    for col in range(chart_source_col_start, chart_source_col_start + len(chart_source_headers)):
+        ws.column_dimensions[get_column_letter(col)].hidden = True
+    for row in range(data_start_row, data_end_row + 1):
         ws.row_dimensions[row].hidden = True
-    for col in range(1, 7):
-        ws.column_dimensions[get_column_letter(col)].hidden = col >= 5
 
 
 def create_excel_file(
@@ -3439,9 +4275,20 @@ def create_excel_file(
     wb.save(final_output)
     return final_output.getvalue()
 
+
 def build_simulation_figure(df_sim: pd.DataFrame) -> go.Figure:
-    plot_df = df_sim.copy()
-    plot_df["配分数値"] = plot_df["配分(%)"].astype(str).str.replace("%", "", regex=False).astype(int)
+    plot_df = _prepare_simulation_dataframe(df_sim)
+    if plot_df.empty:
+        fig = go.Figure()
+        fig.update_layout(
+            title="配分シミュレーション結果",
+            xaxis_title="配偶者取得割合",
+            yaxis_title="相続税額（円）",
+            barmode="group",
+        )
+        return fig
+    plot_df["配分数値"] = plot_df["配分(%)"].apply(_extract_ratio_int)
+    plot_df["配分(%)"] = plot_df["配分表示"]
     plot_df = plot_df.sort_values("配分数値").reset_index(drop=True)
 
     x_labels = plot_df["配分(%)"]
@@ -3475,7 +4322,7 @@ def build_simulation_figure(df_sim: pd.DataFrame) -> go.Figure:
     )
     fig.update_layout(
         barmode="stack",
-        title="配偶者取得割合別 税額比較シミュレーション（内部確認用・概算）",
+        title="配偶者取得割合別 税額比較シミュレーション",
         xaxis_title="横軸：配偶者取得割合（%）",
         yaxis_title="縦軸：概算税額（円）",
         legend_title="表示項目",
@@ -3491,7 +4338,7 @@ def render_audit_evidence() -> None:
         f"""
         <div style="background-color: #f9f9f9; border: 2px solid #{COLOR_GOLD}; padding: 20px; border-radius: 5px;">
             <p style="color: #{COLOR_NAVY}; font-weight: bold; margin-bottom: 10px;">🛡️ 山根会計 監査証跡エビデンス (v31.16)</p>
-            <p style="font-size: 0.9em; line-height: 1.6;">担当: 川東 / 本版は内部確認用の概算試算ロジックです。<br>
+            <p style="font-size: 0.9em; line-height: 1.6;">担当: 川東 / 本版はご提案用の試算レポートです。<br>
             各人別課税価格・各人別税額・配偶者税額軽減の土台に加え、生命保険金非課税の受取人別管理、2割加算、小規模宅地等の要件判定付き概算ロジックを反映しています。<br>
             二次相続・相次相続控除・小規模宅地等の個別論点は、実務利用前に別途確認が必要です。顧客提出前提の完成資料ではありません。提出前に別途レビューを実施してください。</p>
         </div>
@@ -3689,16 +4536,16 @@ def render_tab_primary_detail(df1: pd.DataFrame, df_heirs: pd.DataFrame, df_smal
     st.table(df1)
     st.divider()
     st.subheader("小規模宅地等の特例 判定結果（概算・要確認）")
-    st.dataframe(df_small, use_container_width=True)
+    st.dataframe(df_small, width="stretch")
     st.divider()
     st.subheader("贈与加算・相続時精算課税 明細（概算・要確認）")
     if df_gifts.empty:
         st.caption("贈与明細はありません。")
     else:
-        st.dataframe(df_gifts, use_container_width=True)
+        st.dataframe(df_gifts, width="stretch")
     st.divider()
     st.subheader("各人別課税価格・各人別税額（概算・要個別確認）")
-    st.dataframe(df_heirs, use_container_width=True)
+    st.dataframe(df_heirs, width="stretch")
 
 
 def render_tab_secondary_detail(df2: pd.DataFrame, df_snapshot_summary: pd.DataFrame, df_carryforward: pd.DataFrame, df_audit_notes: pd.DataFrame, df_small_scale_review: pd.DataFrame, df_successive_credit: pd.DataFrame) -> None:
@@ -3708,19 +4555,19 @@ def render_tab_secondary_detail(df2: pd.DataFrame, df_snapshot_summary: pd.DataF
     st.table(df2)
     st.divider()
     st.subheader("一次→二次 接続サマリー（内部確認用）")
-    st.dataframe(df_snapshot_summary, use_container_width=True)
+    st.dataframe(df_snapshot_summary, width="stretch")
     st.divider()
     st.subheader("各人別 carry forward 一覧（内部確認用）")
-    st.dataframe(df_carryforward, use_container_width=True)
+    st.dataframe(df_carryforward, width="stretch")
     st.divider()
     st.subheader("監査メモ・再判定事項（内部確認用）")
-    st.dataframe(df_audit_notes, use_container_width=True)
+    st.dataframe(df_audit_notes, width="stretch")
     st.divider()
     st.subheader("相次相続控除 明細（内部確認用）")
-    st.dataframe(df_successive_credit, use_container_width=True)
+    st.dataframe(df_successive_credit, width="stretch")
     st.divider()
     st.subheader("小規模宅地等 再判定レビュー（内部確認用）")
-    st.dataframe(df_small_scale_review, use_container_width=True)
+    st.dataframe(df_small_scale_review, width="stretch")
 
 
 def estimate_total_taxable_price_reference(primary_inputs: PrimaryInputs) -> Decimal:
@@ -3756,14 +4603,12 @@ def build_simulation_allocation_inputs(
     spouse_amount = quantize_yen(total_taxable_price * to_d(spouse_acquisition_pct) / PERCENT_DENOMINATOR)
     remaining_amount = max(Decimal("0"), total_taxable_price - spouse_amount)
 
-    desired_non_spouse = [to_d(max(0, amount)) for amount in current_inputs[1 : 1 + non_spouse_count]]
+    desired_non_spouse = [to_d(max(0, amount)) for amount in current_inputs[1: 1 + non_spouse_count]]
     fallback_non_spouse_shares = fallback_shares[1:] if len(fallback_shares) > 1 else [Decimal("0")] * non_spouse_count
     normalized_non_spouse = normalize_amounts_to_total(remaining_amount, desired_non_spouse, fallback_non_spouse_shares)
 
     combined = [spouse_amount] + normalized_non_spouse
     return [int(amount) for amount in combined]
-
-
 
 
 def render_tab_secondary_parameters(has_spouse: bool, heirs_info: list[dict[str, Any]], estimated_tax_p: Decimal) -> SecondaryInputs:
@@ -3786,12 +4631,11 @@ def render_tab_secondary_parameters(has_spouse: bool, heirs_info: list[dict[str,
         st.caption(f"参考：一次相続の課税価格合計 {fmt_int(estimated_tax_p)}円 を基準に、各人の実取得額（概算）を入力してください。合計が一致しない場合は内部で比率按分します。")
         for idx, (label, heir_type) in enumerate(labels):
             key = f"actual_acq_{idx}"
-            if key not in st.session_state:
-                st.session_state[key] = default_amounts[idx] if idx < len(default_amounts) else 0
+            default_val = default_amounts[idx] if idx < len(default_amounts) else 0
             amount = st.number_input(
                 f"{label}（{heir_type}）の実取得額",
                 min_value=0,
-                value=int(st.session_state[key]),
+                value=default_val,
                 key=key,
             )
             actual_acquisition_inputs.append(int(amount))
@@ -3818,21 +4662,21 @@ def render_tab_analysis(primary_inputs: PrimaryInputs, primary_result: PrimaryRe
     add_print_button("6. 精密分析結果")
     st.subheader("配偶者取得割合別の税額推移分析（内部確認用・概算・横軸=配偶者取得割合 / 縦軸=税額）")
     render_risk_notice("配偶者取得割合別の比較は内部検討用の参考表示です。差額の背景にある個別論点確認前に断定利用しないでください。", level="info")
-    st.plotly_chart(build_simulation_figure(df_sim), use_container_width=True)
+    st.plotly_chart(build_simulation_figure(df_sim), width="stretch")
     st.dataframe(
         df_sim.style.format({"一次相続税額": "{:,}", "二次相続税額": "{:,}", "合計納税額": "{:,}"}),
-        use_container_width=True,
+        width="stretch",
     )
 
     st.divider()
-    st.subheader("⚠️ 遺留分侵害額の参考表示（内部確認用）")
+    st.subheader("⚠️ 遺留分侵害額の参考表示")
     st.table(iryu_df)
 
     st.divider()
     render_audit_evidence()
 
     st.divider()
-    st.subheader("📥 成果物出力（内部確認用・提出前確認必須）")
+    st.subheader("📥 ご提案資料の出力")
     render_risk_notice(OUTPUT_RISK_NOTICE)
     col_excel, col_pdf, col_ppt = st.columns(3)
     try:
@@ -3852,7 +4696,7 @@ def render_tab_analysis(primary_inputs: PrimaryInputs, primary_result: PrimaryRe
         pdf_data = create_pdf_report(primary_inputs, primary_result, secondary_inputs, secondary_result, df_sim, df_snapshot_summary, df_carryforward, df_audit_notes, df_small_scale_review, df_successive_credit)
         with col_pdf:
             st.download_button(
-                label="📄 PDFファイルをダウンロード（内部確認用）",
+                label="📄 PDFファイルをダウンロード（ご提案資料）",
                 data=pdf_data,
                 file_name=PDF_FILE_NAME,
                 mime="application/pdf",
@@ -3865,7 +4709,7 @@ def render_tab_analysis(primary_inputs: PrimaryInputs, primary_result: PrimaryRe
         ppt_data = create_ppt_report(primary_inputs, primary_result, secondary_inputs, secondary_result, df_sim, df_snapshot_summary, df_carryforward, df_audit_notes, df_small_scale_review, df_successive_credit)
         with col_ppt:
             st.download_button(
-                label="🖥️ PPTファイルをダウンロード（内部確認用）",
+                label="🖥️ PPTファイルをダウンロード（ご提案資料）",
                 data=ppt_data,
                 file_name=PPT_FILE_NAME,
                 mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
